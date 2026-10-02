@@ -283,6 +283,27 @@ node scripts/integration.mjs --ref ref.wav --gpt GPT_weights/your.ckpt --sovits 
 
 ---
 
+## 引用与致谢
+
+本项目的代码以 MIT 发布，其中**有一处是实质性复用他人实现**，其余为接口契约与布局常量的借鉴。**完整清单（含具体文件、具体语句、以及我做了哪些改动）见 [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)** —— 这里只给摘要：
+
+| 来源 | 许可证 | 复用了什么 |
+|---|---|---|
+| [`MaRi23333/dsh-fish-tts`](https://github.com/MaRi23333/dsh-fish-tts) | MIT | **`cleanForSpeech` 的文本清洗正则链 —— 十来个正则逐字符相同**（`lib/client.js` 的 `cleanForTts`），以及 `window.__ModuleLoader__.load` 的 bundle 形态 |
+| [`fangqian616/dsh-say`](https://github.com/fangqian616/dsh-say) | MIT | **GPT-SoVITS `/tts` 请求体与默认值**、`GET /control`（HTTP 错误视为存活）的探活方式（`lib/engines/gptsovits.js`） |
+| DSH 内置 `@deepseek-ai/dsh-client-*` | MIT | 插件注册模式（`ctx.slots.inject` / `register` / `settings.section`）、注入样式表的做法、**操作条按钮与图标契约的几何常量**（28px 盒 / 6px padding / 15px 字形 / `size=16` / 1px `currentColor`）、以及"读 `snapshot.nodes.values()`"这一句 |
+| [`MeteorNOX/DeepSeek-Balance-Whale-Widget`](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget) | MIT | `DSH_HOME \|\| ~/.dsh` 的两级状态目录回退 |
+| [`RVC-Boss/GPT-SoVITS`](https://github.com/RVC-Boss/GPT-SoVITS) | MIT | `api_v2.py` 的端点契约（没有代码被复制） |
+
+下面这几个项目**只作为参考阅读，没有复用代码**，但值得致谢：
+[`TaoruiLiu19/dsh-gsv-tts`](https://github.com/TaoruiLiu19/dsh-gsv)（证明了宿主/客户端分半这条路可行）、
+[`maoyuching/dsh-voice-chat`](https://github.com/maoyuching/dsh-voice-chat)、
+[`haide-D/SillyTavern-EchoCore`](https://github.com/haide-D/SillyTavern-EchoCore)。
+
+**唯一运行时依赖**：`@deepseek-ai/schemastery`（MIT，© DeepSeek），从 registry 安装、未内联。
+
+---
+
 ## 许可与第三方声明
 
 - 本项目是**第三方社区插件**，与 DeepSeek、GPT-SoVITS（RVC-Boss）及其各自的维护者**无任何隶属、合作或背书关系**。"DeepSeek"、"DeepSeek Harness" 与 "GPT-SoVITS" 等名称归其权利人所有，此处仅为描述性使用。

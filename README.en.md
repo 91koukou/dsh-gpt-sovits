@@ -287,6 +287,31 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 
 ---
 
+## Credits and third-party code
+
+This project is MIT-licensed. **One part of it is substantive reuse of someone else's
+implementation**; the rest is interface contracts and layout constants. **The full
+list — exact files, exact statements, and what was changed — is in
+[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).** Summary:
+
+| Source | License | What was reused |
+|---|---|---|
+| [`MaRi23333/dsh-fish-tts`](https://github.com/MaRi23333/dsh-fish-tts) | MIT | **The text-cleaning regular-expression chain in `cleanForSpeech` — around a dozen patterns byte-identical** (from its `cleanForTts`), plus the `window.__ModuleLoader__.load` bundle shape |
+| [`fangqian616/dsh-say`](https://github.com/fangqian616/dsh-say) | MIT | **The GPT-SoVITS `/tts` request body and defaults**, and the `GET /control` liveness probe where an HTTP error means alive (from its `lib/engines/gptsovits.js`) |
+| DSH's bundled `@deepseek-ai/dsh-client-*` | MIT | The plugin registration pattern (`ctx.slots.inject` / `register` / `settings.section`), the injected-stylesheet approach, the **geometry constants for the action row and icon contract** (28px box / 6px padding / 15px glyph / `size=16` / 1px `currentColor`), and the one line that says to read `snapshot.nodes.values()` |
+| [`MeteorNOX/DeepSeek-Balance-Whale-Widget`](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget) | MIT | The two-step `DSH_HOME \|\| ~/.dsh` state-directory fallback |
+| [`RVC-Boss/GPT-SoVITS`](https://github.com/RVC-Boss/GPT-SoVITS) | MIT | The `api_v2.py` endpoint contract (no code copied) |
+
+Read for reference only, **no code reused**, but worth thanking:
+[`TaoruiLiu19/dsh-gsv-tts`](https://github.com/TaoruiLiu19/dsh-gsv) (it demonstrated
+that the host/client split was viable), [`maoyuching/dsh-voice-chat`](https://github.com/maoyuching/dsh-voice-chat),
+and [`haide-D/SillyTavern-EchoCore`](https://github.com/haide-D/SillyTavern-EchoCore).
+
+**Only runtime dependency**: `@deepseek-ai/schemastery` (MIT, © DeepSeek), installed
+from the registry rather than vendored.
+
+---
+
 ## License and third-party notices
 
 - This is a **third-party community plugin**. It is **not affiliated with, endorsed by, or partnered with** DeepSeek, GPT-SoVITS (RVC-Boss), or their maintainers. "DeepSeek", "DeepSeek Harness" and "GPT-SoVITS" belong to their respective owners and are used here descriptively only.
