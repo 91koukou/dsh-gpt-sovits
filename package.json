@@ -50,11 +50,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/USERNAME/dsh-gpt-sovits.git"
+    "url": "git+https://github.com/91koukou/dsh-gpt-sovits.git"
   },
   "bugs": {
-    "url": "https://github.com/USERNAME/dsh-gpt-sovits/issues"
+    "url": "https://github.com/91koukou/dsh-gpt-sovits/issues"
   },
-  "homepage": "https://github.com/USERNAME/dsh-gpt-sovits#readme",
+  "homepage": "https://github.com/91koukou/dsh-gpt-sovits#readme",
   "license": "MIT"
 }
