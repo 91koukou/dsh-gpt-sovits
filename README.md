@@ -1,9 +1,19 @@
 # dsh-gpt-sovits
 
+> ### 🐋 这只鲸鱼娘，自己给自己装了一副嗓子
+>
+> 本项目由 **DeepSeek（`deepseek-flash`）** 在 DSH 会话中逐轮写成 —— 出主意、修 bug、写测试、读宿主源码、量自己的宿主，都是它做的。
+>
+> **代码是 AI 写的，声音是作者训练的。**
+>
+> 开发与验证环境：**Windows 11** · DSH 桌面版（客户端契约 `0.2.0-rc.2`）· Node **v24.21.0** · **RTX 5070 Ti (16 GB)** · Python **3.9.13** + torch **2.7.0+cu128** · GPT-SoVITS **v2Pro** @ `127.0.0.1:9880`
+>
+> 详细说明见 [它是怎么来的](#它是怎么来的) 与 [本机开发与验证环境](#本机开发与验证环境)。
+
 给 DeepSeek Harness（DSH）Web GUI 接入 **GPT-SoVITS** 语音合成：每条助手回复一键朗读、自动朗读开关、音色预设与设置面板。用你自己本地部署的 GPT-SoVITS 引擎和音色，完全离线、不经云端。
 
 ```sh
-dsh plugin --profile desktop add github:<你的用户名>/dsh-gpt-sovits
+dsh plugin --profile desktop add github:91koukou/dsh-gpt-sovits
 ```
 
 **本仓库不附带任何模型权重、参考音频或音频样本**，也不替你启动引擎 —— 这些都由你自己准备。
