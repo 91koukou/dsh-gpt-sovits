@@ -104,7 +104,7 @@ Open **Settings → Voice (GPT-SoVITS)**.
 | Field | Default | Notes |
 |---|---|---|
 | Engine URL | `http://127.0.0.1:9880` | Where `api_v2.py` listens |
-| Checkout directory | auto | Used to discover trained weights; empty means search automatically |
+| Checkout directory | auto | GPT-SoVITS install directory, used to list the weights you trained. **Setting it skips the drive scan** (see [Known limitations](#known-limitations)) |
 | Voice presets | empty | `name` + `GPT weights` + `SoVITS weights` + `reference clip` + `reference transcript` + `reference language` |
 | Default voice | first | Which preset to speak with; empty means the first in the list |
 | Text language | `zh` | `zh/en/ja/ko/yue/auto` |
@@ -233,6 +233,22 @@ Regression coverage: a fake store, fake React effects and a fake `Audio` verify 
 | When the host half reloads | Installation mounts the plugin immediately (routes answer at once), but already-loaded module code **does not hot-reload** — code changes need a DSH restart |
 
 ### Known limitations
+
+- **On Windows it enumerates drive letters to auto-discover the engine** (`engineRootCandidates()` in `lib/index.js`). With no checkout directory configured and no `DSH_SOVITS_ENGINE_ROOT` set, the plugin **tries to read the root of `A:\` through `Z:\`** and keeps directories whose name matches `/^gpt[-_]?sovits/i` as candidates.
+
+  What it actually does is narrower than it sounds:
+
+  | Question | Behaviour |
+  |---|---|
+  | What is read | **Only the top level of each drive root** (`readdirSync`) — no recursion, no walking of directory trees |
+  | What is taken | **Directory names only**, for pattern matching; no file contents |
+  | Missing drives | Empty floppy drives (`A:\`, `B:\`) are skipped inside `try`/`catch` — reading one can raise the "insert a disk" prompt on some machines |
+  | When it runs | Only when the model list is requested or the settings page opens; `listWeights()` stops at the first valid checkout |
+  | Does it write | **No.** There is no write of any kind on this path |
+
+  **To stop the scan entirely**: set the checkout directory in the settings page (or export `DSH_SOVITS_ENGINE_ROOT`). Explicit configuration is tried first, and a hit there means the drive scan never runs.
+
+  Why it works this way: the official Windows package is an archive that people unpack wherever there is room — often a secondary drive root — so there is no fixed install location; and the path has to be readable by the **engine process**, which makes hand-typed paths error-prone.
 
 - The synthesis cache is an in-process `Map` plus WAV files on disk, capped at 120 entries; a restart clears the index (the WAVs stay in `audio/`).
 - Playback rate depends on the browser's `preservesPitch`; where it is missing, playback is pinned to 1× (the settings page says so).
