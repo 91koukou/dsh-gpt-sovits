@@ -25,3 +25,9 @@ engine-start.log
 Thumbs.db
 desktop.ini
 *.swp
+*.orig
+*.rej
+
+# Python bytecode, produced when the supervisor is compiled during checks
+__pycache__/
+*.pyc

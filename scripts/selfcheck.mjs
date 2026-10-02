@@ -97,7 +97,19 @@ check('host: /tts payload matches the api_v2.py contract', () => {
   // media_type must stay inside the engine's closed set.
   assert(/media_type: 'wav'/.test(hostSource), "media_type must be 'wav' (mp3 is rejected by the engine)")
   assert(/streaming_mode: false/.test(hostSource), 'streaming_mode must be false to get one complete WAV')
-  return '13 fields, wav, non-streaming'
+  /*
+   * The split method is chosen per request, and the default matters.
+   *
+   * Streaming text goes one sentence at a time and must NOT be split again: with
+   * `cut5` the engine cut on its own boundaries, disagreed with the client's, and
+   * the piece it had not finished when the next request arrived was dropped.
+   * A settled summary is packed into blocks, and there `cut5` lets the engine cut
+   * inside a block. A request that expresses no preference must default to `cut0`,
+   * because an unexpected split is what produced truncation in the first place.
+   */
+  assert(/text_split_method: splitMethod === 'cut5' \? 'cut5' : 'cut0'/.test(hostSource), 'the split method must be per request, defaulting to cut0')
+  assert(/splitMethod === 'cut5'/.test(hostSource), 'only an explicit cut5 preference may enable splitting')
+  return '13 fields, wav, non-streaming, split-on-request'
 })
 
 check('host: starts the engine itself instead of waiting for the watchdog', () => {
@@ -275,6 +287,8 @@ check('host: validates that the engine really returned WAV', () => {
 
 const clientPath = path.join(root, 'lib', 'client.js')
 const clientSource = readFileSync(clientPath, 'utf8')
+/** The Python supervisor, checked as text: it runs outside Node entirely. */
+const supervisorSource = readFileSync(path.join(root, 'lib', 'supervisor.py'), 'utf8')
 
 check('client: parses as a script', () => {
   // eslint-disable-next-line no-new-func
@@ -505,6 +519,9 @@ check('client: registers the four slots against live names', () => {
   const ctx = {
     effect: () => () => {},
     on: () => () => {},
+    // The shell exposes sub-services through ctx.get; a stub without it fails
+    // any guard that probes for an optional service.
+    get: () => undefined,
     locale: {
       getLocale: () => ({ active: 'zh' }),
       bind: () => (key) => key,
@@ -669,6 +686,9 @@ async function driveAutoRead({ turns, autoReadOnLoad, previousLastRead }) {
   const ctx = {
     effect: () => () => {},
     on: () => () => {},
+    // The shell exposes sub-services through ctx.get; a stub without it fails
+    // any guard that probes for an optional service.
+    get: () => undefined,
     locale: {
       getLocale: () => ({ active: 'zh' }),
       bind: () => (key) => key,
@@ -725,6 +745,221 @@ await (async () => {
     return '3 drivers mounted, 1 spoke'
   })
 
+  await check('client: a growing reply is queued sentence by sentence, never cut off', async () => {
+    /*
+     * The bug this replaces: auto-read called `play()`, which begins with `stop()`,
+     * so every text update killed the sentence being spoken. The log showed `speak`
+     * followed 4 ms later by `play-failed` on the previous message, for four
+     * utterances out of five.
+     *
+     * The queue must therefore satisfy three things at once: sentences spoken in
+     * order, nothing cut off mid-way, and no replay of sentences already handed
+     * over when the reply grows.
+     */
+    const player = loadClient({ effects: false, env: fakeWindow() }).exports.__test.player
+    const words = { link: '链接', path: '路径', id: '编号', code: '长代码', codeBlock: '（代码块已省略）' }
+    const spoken = []
+    // Record what would be synthesized, and fail the test if anything is stopped.
+    player.requestClip = async (text) => {
+      spoken.push(text)
+      return '/gpt-sovits/audio/test.wav'
+    }
+    player.playClip = async () => {}
+    const stopsBefore = player.generation
+    player.stop = () => {
+      throw new Error('the queue must not stop playback when it grows')
+    }
+
+    // A reply arriving in three pieces, as streaming delivers it.
+    player.enqueue('m1', '第一句。第二句', words, false)
+    await settle()
+    player.enqueue('m1', '第一句。第二句。第三句', words, false)
+    await settle()
+    // Settled: the unterminated tail is flushed.
+    player.enqueue('m1', '第一句。第二句。第三句。尾巴', words, true)
+    await settle()
+
+    /*
+     * Streaming pieces are spoken one sentence at a time. The settled pass packs
+     * consecutive sentences into blocks instead, because a finished summary arrives
+     * as one large block and paying the per-request cost per sentence would let the
+     * engine fall behind the listener. Both paths speak every sentence exactly once,
+     * in order.
+     */
+    assert(spoken.length === 3, `expected the streamed sentences, got ${spoken.length}: ${JSON.stringify(spoken)}`)
+    assert(spoken[0] === '第一句。', `sentence 1 wrong: ${spoken[0]}`)
+    assert(spoken[1] === '第二句。', `sentence 2 wrong: ${spoken[1]}`)
+    // The settled pass packs what is left: sentence 3 plus the unterminated tail.
+    assert(spoken[2] === '第三句。 尾巴', `the settled block is wrong: ${spoken[2]}`)
+    const joined = spoken.join('')
+    for (const piece of ['第一句。', '第二句。', '第三句。', '尾巴']) {
+      assert(joined.split(piece).length === 2, `"${piece}" must appear exactly once: ${joined}`)
+    }
+    assert(player.generation === stopsBefore, 'enqueue must not bump the generation')
+    return 'streamed per sentence, packed once settled, nothing cut off or replayed'
+  })
+
+  await check('client: synthesis runs ahead of playback, so sentences do not gap', async () => {
+    /*
+     * The naive drain awaited synthesis and then playback, so every sentence began
+     * with a synthesis-sized hole and the gap grew as the reply went on. The fix is
+     * to keep clips synthesizing while the current one plays.
+     *
+     * Measured by making playback slow and asking how many syntheses were ever in
+     * flight at once: a serial implementation can only ever reach one.
+     */
+    const player = loadClient({ effects: false, env: fakeWindow() }).exports.__test.player
+    const words = { link: '链接', path: '路径', id: '编号', code: '长代码', codeBlock: '（代码块已省略）' }
+    let started = 0
+    let inFlight = 0
+    let maxConcurrent = 0
+    player.requestClip = async () => {
+      started += 1
+      inFlight += 1
+      maxConcurrent = Math.max(maxConcurrent, inFlight)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      inFlight -= 1
+      return '/gpt-sovits/audio/test.wav'
+    }
+    player.playClip = async () => {
+      // Slow playback: the prefetch window has to cover this.
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    player.enqueue('m1', '第一句。第二句。第三句。', words, false)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    assert(started === 3, `expected 3 requests, got ${started}`)
+    assert(maxConcurrent >= 2, `synthesis must overlap playback, but only ${maxConcurrent} was ever in flight`)
+    return `3 requests, up to ${maxConcurrent} in flight at once`
+  })
+
+  await check('client: leaving the settings page does not stop playback', () => {
+    /*
+     * The startup greeting kept vanishing. The cause was the settings panel's unmount
+     * handler calling `player.stop()` unconditionally: opening the page and navigating
+     * away (or a re-render unmounting it) killed whatever was playing, and a 试音 click
+     * made it worse by taking the audio channel first.
+     *
+     * Audio belongs to the player, not to a settings panel. Only the settings
+     * component's own unmount handler is inspected: ReadAloudAction legitimately stops
+     * playback, so a blanket search would flag the wrong code.
+     */
+    const settingsAt = clientSource.indexOf('function SovitsSettings')
+    assert(settingsAt !== -1, 'the settings component must exist')
+    const body = clientSource.slice(settingsAt, settingsAt + 12000)
+    const handlerAt = body.indexOf('() => () => {\n\t\t\t\t\talive.current = false;')
+    assert(handlerAt !== -1, 'the unmount handler must still mark the component dead')
+    // Up to the effect's dependency array, with comments stripped: the handler
+    // documents why it does NOT stop playback, and that prose must not be mistaken
+    // for a call.
+    const handler = body
+      .slice(handlerAt, body.indexOf('[]', handlerAt))
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+    assert(
+      !/player\.stop\(\)/.test(handler),
+      `the settings unmount handler must not stop playback owned by the player:\n${handler}`,
+    )
+    return 'unmount only marks the component dead'
+  })
+
+  await check('client: a settled reply is packed into blocks, streaming is not', async () => {
+    /*
+     * The two halves of a reply are handled differently on purpose. A long summary
+     * must not cost one engine request per sentence; streaming text must start
+     * speaking as early as possible.
+     */
+    const client = loadClient({ effects: false, env: fakeWindow() })
+    const player = client.exports.__test.player
+    const words = { link: '链接', path: '路径', id: '编号', code: '长代码', codeBlock: '（代码块已省略）' }
+    const requestSizes = []
+    player.requestClip = async (text) => {
+      requestSizes.push(text.length)
+      return '/gpt-sovits/audio/test.wav'
+    }
+    player.playClip = async () => {}
+
+    // Five short sentences, settled in one go: must arrive as few blocks, not five.
+    const summary = '第一句。第二句。第三句。第四句。第五句。'
+    player.enqueue('s1', summary, words, true)
+    await settle()
+    assert(requestSizes.length < 5, `a settled reply must be packed, got ${requestSizes.length} requests`)
+    assert(requestSizes.length >= 1, 'the settled reply must produce at least one request')
+    assert(Math.max(...requestSizes) <= 200, `a block grew too large: ${Math.max(...requestSizes)}`)
+
+    // The same text while streaming: one request per sentence, so audio starts sooner.
+    requestSizes.length = 0
+    player.queued.clear()
+    player.enqueue('s2', '第一句。第二句。第三句。', words, false)
+    await settle()
+    assert(requestSizes.length === 3, `streaming must stay one sentence per request, got ${requestSizes.length}`)
+    return 'settled reply packed, streaming one sentence per request'
+  })
+
+  await check('client: a new turn cancels the previous turn queue', async () => {
+    /*
+     * The user's requirement, verbatim: entering a new round must cancel all the
+     * previous processing and playback. Leftover sentences belong to a question that
+     * is already answered, and speaking them over the new turn is the interruption
+     * the queue exists to prevent.
+     *
+     * The signal is the shell's own turn counter (`snapshot.timeline.turnOrder`),
+     * the same thing the shell uses to reason about turns.
+     */
+    const client = loadClient({ effects: false, env: fakeWindow() })
+    const player = client.exports.__test.player
+    const words = { link: '链接', path: '路径', id: '编号', code: '长代码', codeBlock: '（代码块已省略）' }
+    const spoken = []
+    player.requestClip = async (text) => {
+      spoken.push(text)
+      return '/gpt-sovits/audio/test.wav'
+    }
+    // Hold playback open so the queue keeps items while the assertions run.
+    player.playClip = () => new Promise(() => {})
+    player.stop = () => {
+      player.generation += 1
+      player.pending = []
+      player.queued.clear()
+    }
+    // Request and playback are both stubbed, so the queue holds still long enough to
+    // inspect: with the real `playClip` there is no Audio in this sandbox and the
+    // drain loop would fail out and empty the queue before the assertion.
+    player.enqueue('old', '旧回合第一句。旧回合第二句。', words, false)
+    /*
+     * The per-message offset, not `pending`: `enqueue` starts the drain synchronously
+     * and the drain immediately shifts the first item out for synthesis, so `pending`
+     * is already empty by the time this line runs. The offset is what proves the turn
+     * had work in it.
+     */
+    assert(player.queuedUpTo('old') > 0, 'the old turn must have queued something first')
+    // A new turn: the driver calls stop(), which clears the queue and bumps
+    // generation so in-flight synthesis for the old turn is discarded.
+    player.stop()
+    assert(player.pending.length === 0, `the queue must be cleared, ${player.pending.length} left`)
+    assert(player.queuedUpTo('old') === 0, 'the per-message offset must be forgotten')
+    return 'queue cleared and generation bumped on a new turn'
+  })
+
+  await check('client: an unterminated sentence waits for its ending', async () => {
+    // A half-written sentence must not be synthesized: the fragment would be
+    // spoken and then repeated once the rest of it arrived.
+    const player = loadClient({ effects: false, env: fakeWindow() }).exports.__test.player
+    const words = { link: '链接', path: '路径', id: '编号', code: '长代码', codeBlock: '（代码块已省略）' }
+    const spoken = []
+    player.requestClip = async (text) => {
+      spoken.push(text)
+      return '/gpt-sovits/audio/test.wav'
+    }
+    player.playClip = async () => {}
+    player.enqueue('m1', '这是一句还没写完的话', words, false)
+    await settle()
+    assert(spoken.length === 0, `an unterminated sentence must not be spoken, got ${JSON.stringify(spoken)}`)
+    player.enqueue('m1', '这是一句还没写完的话，现在写完了。', words, false)
+    await settle()
+    assert(spoken.length === 1, `the completed sentence must be spoken once, got ${spoken.length}`)
+    assert(spoken[0] === '这是一句还没写完的话，现在写完了。', `unexpected text: ${spoken[0]}`)
+    return 'fragment withheld, complete sentence spoken once'
+  })
+
   await check('client: turning auto-read on does not read the reply already on screen', async () => {
     const turns = [
       { turn: 1, messageId: 'm1', text: '第一轮回复' },
@@ -755,6 +990,9 @@ await (async () => {
     const ctx = {
       effect: () => () => {},
       on: () => () => {},
+    // The shell exposes sub-services through ctx.get; a stub without it fails
+    // any guard that probes for an optional service.
+    get: () => undefined,
       locale: {
         getLocale: () => ({ active: 'zh' }),
         bind: () => (key) => key,
@@ -805,6 +1043,9 @@ await (async () => {
     client.exports.apply({
       effect: () => () => {},
       on: () => () => {},
+    // The shell exposes sub-services through ctx.get; a stub without it fails
+    // any guard that probes for an optional service.
+    get: () => undefined,
       locale: { getLocale: () => ({ active: 'zh' }), bind: () => (key) => key, register: () => () => {} },
       slots: {
         inject: (_n, cb) => cb(),
@@ -914,6 +1155,9 @@ await (async () => {
     client.exports.apply({
       effect: () => () => {},
       on: () => () => {},
+    // The shell exposes sub-services through ctx.get; a stub without it fails
+    // any guard that probes for an optional service.
+    get: () => undefined,
       locale: { getLocale: () => ({ active: 'zh' }), bind: () => (key) => key, register: () => () => {} },
       slots: {
         inject: (_n, cb) => cb(),
@@ -985,6 +1229,7 @@ function extractFunction(source, name) {
 }
 
 const helpers = [
+  'speakNormalize',
   'cleanForSpeech',
   'splitIntoChunks',
   'blocksToText',
@@ -998,11 +1243,11 @@ const helpers = [
 
 check('client: text helpers are present and callable', () => {
   const WORDS = { zh: { link: '链接', path: '路径', id: '编号', code: '长代码', codeBlock: '（代码块已省略）' } }
-  const CHUNK_CHARS = 110
+  const SENTENCE_SOFT_MAX = 280
   const source = helpers.map((name) => extractFunction(clientSource, name)).join('\n')
-  const sandbox = { WORDS, CHUNK_CHARS }
+  const sandbox = { WORDS, SENTENCE_SOFT_MAX }
   vm.createContext(sandbox)
-  vm.runInContext(`${source}\nglobalThis.__h = { cleanForSpeech, splitIntoChunks, blocksToText, selectText, selectLatestMessageId }`, sandbox)
+  vm.runInContext(`${source}\nglobalThis.__h = { speakNormalize, cleanForSpeech, splitIntoChunks, blocksToText, selectText, selectLatestMessageId }`, sandbox)
   const api = sandbox.__h
 
   // The store shape measured on this install: `snapshot.nodes` is a Map.
@@ -1047,20 +1292,211 @@ check('client: text helpers are present and callable', () => {
   assert(!cleaned.includes('#'), 'markdown markers must be stripped')
   assert(!cleaned.includes('**'), 'emphasis markers must be stripped')
 
-  const chunks = api.splitIntoChunks('第一句。第二句！第三句？' + '很长的句子'.repeat(40))
-  assert(chunks.length > 1, 'long prose must be split into multiple chunks')
-  assert(chunks.every((chunk) => chunk.length <= CHUNK_CHARS * 2), 'no chunk may be unbounded')
+  /*
+   * One sentence per request. This is the fix for audio cut off mid-sentence:
+   * the old splitter packed sentences into a ~110-character buffer, which cut
+   * ordinary sentences in half and left the engine to re-split the request.
+   */
+  const chunks = api.splitIntoChunks('第一句。第二句！第三句？')
+  assert(chunks.length === 3, `each sentence must be its own request, got ${chunks.length}`)
+  assert(chunks[0] === '第一句。' && chunks[2] === '第三句？', `sentences split wrong: ${JSON.stringify(chunks)}`)
+  assert(chunks.every((chunk) => chunk.length <= SENTENCE_SOFT_MAX), 'no chunk may be unbounded')
+
+  // A sentence far over the soft max degrades at clause marks, not mid-word.
+  const runOn = api.splitIntoChunks(`很长的一句${'，从句内容'.repeat(60)}。`)
+  assert(runOn.length > 1, 'an oversized sentence must still be broken up')
+  assert(runOn.every((chunk) => chunk.length <= SENTENCE_SOFT_MAX + 20), `clause chunks too long: ${runOn.map((c) => c.length)}`)
+  assert(runOn.every((chunk) => !chunk.startsWith('，')), 'a clause chunk must not start with its separator')
 
   // Regression, seen in the engine's own log: it splits on trailing punctuation,
   // so a chunk starting with `。` became an empty first sentence and the engine
   // logged `实际输入的目标文本: 。你好…` and synthesized a stray pause.
   const leading = api.splitIntoChunks('。你好，这是测试。音色已就绪。')
-  // Both sentences fit in one chunk, so only the leading punctuation may go.
-  assert(leading[0] === '你好，这是测试。音色已就绪。', `leading punctuation survived: ${JSON.stringify(leading[0])}`)
+  assert(leading[0] === '你好，这是测试。', `leading punctuation survived: ${JSON.stringify(leading[0])}`)
   assert(leading.every((chunk) => !/^[。！？!?；;…，,、：:]/.test(chunk)), 'no chunk may start with punctuation')
   assert(api.splitIntoChunks('\n\n  你好。\n\n').length === 1, 'whitespace must not create an empty chunk')
 
-  return `${chunks.length} chunks, markdown stripped, Map and array stores honoured`
+  /*
+   * Symbol-to-speech rewriting. Each case here was reported from listening to the
+   * output: the engine drops these symbols, so they have to become words.
+   */
+  const spoken = (input) => api.speakNormalize(input, WORDS.zh)
+  assert(spoken('运行 cmd.exe 即可') === '运行 cmd点exe 即可', `cmd.exe: ${spoken('运行 cmd.exe 即可')}`)
+  assert(spoken('把 3-10 改成 3 减 10') === '把 3到10 改成 3 减 10', `range: ${spoken('把 3-10 改成 3 减 10')}`)
+  assert(spoken('3 ~ 10 之间') === '3到10 之间', `tilde range: ${spoken('3 ~ 10 之间')}`)
+  assert(spoken('看 v2.7.0 版本') === '看 v2点7点0 版本', `version: ${spoken('看 v2.7.0 版本')}`)
+  assert(spoken('连 127.0.0.1 端口') === '连 127点0点0点1 端口', `IP: ${spoken('连 127.0.0.1 端口')}`)
+  assert(spoken('温度 36.5 度') === '温度 36点5 度', `decimal: ${spoken('温度 36.5 度')}`)
+  // A date must not be turned into a double range.
+  assert(spoken('2024-10-03 提交') === '2024-10-03 提交', `date: ${spoken('2024-10-03 提交')}`)
+  /*
+   * Slash and backslash readings the author asked for: a real fraction is spoken
+   * as such, everything else reads as "或", and a path separator reads as "杠".
+   */
+  assert(spoken('是真/假') === '是真或假', `alt slash: ${spoken('是真/假')}`)
+  assert(spoken('选 是/否/待定') === '选 是或否或待定', `chained slash: ${spoken('选 是/否/待定')}`)
+  assert(spoken('占 3/4 比例') === '占 4分之3 比例', `fraction: ${spoken('占 3/4 比例')}`)
+  assert(spoken('反斜杠 a\\b') === '反斜杠 a杠b', `backslash: ${spoken('反斜杠 a\\b')}`)
+  /*
+   * Masking order: slashes inside a URL, a path or a UUID must not become "或".
+   * Without the mask pass the separator rule rewrites them.
+   */
+  assert(
+    spoken('看 https://a.com/b 这个') === '看 链接 这个',
+    `a URL must be masked before the slash rule: ${spoken('看 https://a.com/b 这个')}`,
+  )
+  assert(!spoken('打开 C:\\Users\\me\\a.txt').includes('或'), 'a path must not gain 或')
+  // Normalization runs before cleanForSpeech, so the extension survives.
+  const pipeline = api.cleanForSpeech(spoken('执行 cmd.exe'), WORDS.zh)
+  assert(pipeline.includes('点exe'), `pipeline lost the extension: ${pipeline}`)
+
+  return `${chunks.length} sentences, markdown stripped, symbols spoken, Map and array stores honoured`
+})
+
+check('client: the startup greeting is once per session and silent on failure', () => {
+  // The greeting tells the user the plugin is ready, but it must not fire on every
+  // refresh (waiting for the models makes a repeat genuinely irritating) and it
+  // must never surface an error when it cannot be synthesized.
+  assert(/sessionStorage\.getItem\(GREETING_SESSION_KEY\)/.test(clientSource), 'a session mark must gate the greeting')
+  assert(/let GREETING_STARTED = false/.test(clientSource), 'a module latch must cover the storage race')
+  assert(!/GREETING_DELAY_MS/.test(clientSource), 'no artificial delay: the host warms the greeting at boot')
+  assert(/GREETING_ATTEMPTS/.test(clientSource), 'the greeting must poll while the host is still warming up')
+  assert(/action=greeting/.test(clientSource), 'the client must ask the host for the greeting clip')
+  // Played by URL: the host already synthesized it, so a second engine call is waste.
+  assert(/payload\.url/.test(clientSource), 'the greeting clip must be played by its URL')
+  assert(/diag\("greet-failed"/.test(clientSource), 'a failed greeting must be reported, not thrown')
+  assert(/diag\("greet-timeout"/.test(clientSource), 'giving up must be reported too')
+  return 'latched, session-gated, polled, played by URL, failure-tolerant'
+})
+
+check('host: the greeting is produced when the engine is idle, never while it works', () => {
+  /*
+   * Every earlier design failed on a real machine because each one guessed *when* the
+   * engine would be ready: a fixed delay fired before the port was bound, and a
+   * readiness wait still assumed boot was the only thing competing for the engine.
+   *
+   * The rule is now: produce the greeting when the engine is free, and stand down the
+   * moment it starts working. The client polls; the host answers with a state.
+   */
+  assert(/const greetingGate = /.test(hostSource), 'the gate must be a single named decision')
+  assert(/if \(engineQueueBusy\(\)\) return \{ state: 'engine-busy' \}/.test(hostSource), 'real work must stand the greeting down')
+  assert(/recentHealth\(\)/.test(hostSource), 'reachability must come from the cache, not a probe per poll')
+  assert(/healthCache = health/.test(hostSource), 'the heartbeat must refresh that cache')
+  // The route must answer immediately with a state, so 500 ms polling cannot pile up.
+  assert(/const gate = greetingGate\(\)/.test(hostSource), 'the route must consult the gate')
+  assert(/state: gate\.state/.test(hostSource), 'the route must report why it is not ready')
+  assert(/greetingPromise = undefined/.test(hostSource), 'the in-flight latch must be released on every path')
+  return 'gated on engine idleness, cached reachability, answering immediately'
+})
+
+check('host: engine state is sampled every 100 ms', () => {
+  /*
+   * The design calls for 100 ms. The fast tick reads local variables only; the HTTP
+   * probe that answers "is the engine reachable?" runs every 20th tick, because ten
+   * probes a second would compete with the synthesis they are meant to observe.
+   */
+  assert(/const FAST_MS = 100/.test(hostSource), 'the fast tick must be 100 ms')
+  assert(/PROBE_EVERY = 20/.test(hostSource), 'the HTTP probe must run on a slower divisor')
+  assert(/ticks % PROBE_EVERY !== 0/.test(hostSource), 'the probe must be skipped on non-divisor ticks')
+  assert(/engineQueueBusy\(\)/.test(hostSource), 'the fast tick must sample the local busy flag')
+  assert(/engineBusySince/.test(hostSource) && /engineIdleSince/.test(hostSource), 'busy and idle times must be recorded')
+  return '100 ms local sampling, 2 s reachability probe'
+})
+
+check('host: the engine console output is captured and readable', () => {
+  /*
+   * The engine's stdout/stderr is what the API console window used to show, and it went
+   * to DEVNULL -- which is why engine-side failures were invisible from the UI.
+   */
+  assert(/engineOutputPath/.test(hostSource), 'the engine output needs a captured file')
+  assert(/'--engine-log', engineOutputPath\(\)/.test(hostSource), 'the supervisor must be told to capture it')
+  assert(/action === 'logs'/.test(hostSource), 'a route must serve the captured logs')
+  assert(/transcript: recentSynthesis/.test(hostSource), 'the console must also show what was generated')
+  // The supervisor must actually redirect into the file, and merge stderr into stdout.
+  assert(/stderr=subprocess\.STDOUT/.test(supervisorSource), 'stderr must be merged into the captured stream')
+  assert(/options\.engine_log/.test(supervisorSource), 'the supervisor must honour --engine-log')
+  return 'captured, served, stderr merged'
+})
+
+check('host: the engine console is decoded as UTF-8, with a code-page fallback', () => {
+  /*
+   * Measured mojibake, reported by the user: Python on Windows encodes stdout/stderr with
+   * the console code page (cp936 here), so every Chinese line the engine printed came out
+   * garbled in the panel -- including the socket errors and the target text, which is
+   * exactly the content a reader needs when something goes wrong.
+   *
+   * Both halves of the fix are checked: the supervisor tells the engine to emit UTF-8, and
+   * the reader re-decodes a log left by an older supervisor rather than showing it wrong.
+   */
+  assert(/PYTHONIOENCODING/.test(supervisorSource), 'the engine must be told to emit UTF-8')
+  assert(/engine_env/.test(supervisorSource), 'the spawn must build that environment')
+  assert(/env=engine_env/.test(supervisorSource), 'the environment must actually reach Popen')
+  assert(/new TextDecoder\('gbk'\)/.test(hostSource), 'the reader must have a code-page fallback')
+  assert(/includes\('\\uFFFD'\)/.test(hostSource), 'the fallback must trigger on a replacement character')
+  const readAt = hostSource.indexOf('const readTail = (file)')
+  const useAt = hostSource.indexOf('readTail(file)')
+  assert(readAt !== -1 && useAt > readAt, 'the log reader must use the tolerant read')
+  return 'engine emits UTF-8, reader tolerates an older code page'
+})
+
+check('client: the engine console is embedded in the settings page', () => {
+  /*
+   * Two designs were rejected before this one, and both reasons are worth keeping:
+   *
+   *  - A **separate console window** steals focus, and closing it kills the engine,
+   *    because that window *is* the process's console.
+   *  - A **right-sidebar tab** made DSH report a background task as running, and the
+   *    registration is a host-composed client capability: on a build without it the
+   *    plugin loads with the tab missing, and depending on it can stop the plugin from
+   *    coming up at all. The user rejected this outright.
+   *
+   * Slot content inside the settings page has neither problem: it cannot affect the
+   * boot, and it needs no shell capability beyond the slot it already uses.
+   */
+  assert(/function EngineConsole\(props\)/.test(clientSource), 'the console component must exist')
+  assert(/h\(EngineConsole, \{ t \}\)/.test(clientSource), 'the settings page must render it')
+  assert(/action=logs/.test(clientSource), 'the console must read the captured logs')
+  assert(!/sidebarRightTabs/.test(clientSource), 'no sidebar tab registration: rejected, and it can affect the boot')
+  assert(!/sidebar\.right\.pane\.tab/.test(clientSource), 'no right-sidebar slot usage: the console belongs inline')
+  return 'inline in the settings page, no shell capability needed'
+})
+
+
+check('host: the greeting never nests the engine queue', () => {
+  /*
+   * Measured deadlock, and a total one: `speak` already queues its own synthesis, so
+   * wrapping the call in `withEngine` nests the serial chain inside itself. The outer
+   * entry holds the chain while the inner one waits for it, and the greeting sits in
+   * `synthesizing` forever with the engine reported busy -- observed for over 60 s with
+   * no progress at all.
+   *
+   * The engine queue is the only place that may call `withEngine`, and it must do so
+   * exactly once per operation.
+   */
+  const calls = hostSource.match(/await withEngine\(/g) ?? []
+  assert(calls.length === 1, `exactly one withEngine call site is expected, found ${calls.length}`)
+  assert(!/withEngine\(\(\) => speak/.test(hostSource), 'speak must never be wrapped: it queues internally')
+  assert(/const result = await speak\(\{ text, signal: undefined \}\)/.test(hostSource), 'the greeting must call speak directly')
+  return 'one call site, speak called un-nested'
+})
+
+check('host: the greeting route degrades instead of failing the plugin', () => {
+  assert(/action === 'greeting'/.test(hostSource), 'the greeting route must exist')
+  assert(/greetOnStart: Schema\.boolean\(\)/.test(hostSource), 'greetOnStart must be configurable')
+  assert(/greetText: Schema\.string\(\)/.test(hostSource), 'greetText must be configurable')
+  // A greeting that could not be produced answers 200 with ok:false: a missing
+  // nicety must never look like a broken plugin, and a disabled greeting must not
+  // pay for a synthesis to say so.
+  assert(
+    /sendJson\(res, 200, \{\s*ok: false,\s*enabled: true,\s*state: greetingError/.test(hostSource),
+    'a failed greeting must still answer 200',
+  )
+  assert(
+    /sendJson\(res, 200, \{ ok: true, enabled: false, state: gate\.state \}\)/.test(hostSource),
+    'a disabled greeting must answer without synthesizing',
+  )
+  assert(/greetOnStart: effective\.greetOnStart/.test(hostSource), 'the settings view must expose the greeting flags')
+  return 'greeting route, configurable, 200-on-failure'
 })
 
 // ── Report ────────────────────────────────────────────────────────────────────

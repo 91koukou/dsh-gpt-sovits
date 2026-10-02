@@ -378,6 +378,159 @@ if (SKIP_SYNTHESIS) {
     console.log('  SKIP  weight switching (pass --gpt and --sovits to exercise it)')
   }
 
+  /*
+   * Ordered *after* the weight-switch check on purpose.
+   *
+   * The host remembers which weight pair the engine currently holds
+   * (`activeGpt`/`activeSovits`), so a synthesis here would switch the weights and
+   * the weight-switch test that follows would then see "unchanged" and issue no
+   * setter call. Running the greeting last keeps that test's precondition — a first
+   * synthesis with named weights — intact.
+   */
+  await step('the status route reports what the plugin is doing', async () => {
+    /*
+     * Built because "the greeting did not arrive" had no answer from outside: models
+     * loading, a preview holding the single worker, and a clip that was synthesized
+     * but never played all look identical. This route is what tells them apart, so it
+     * must always answer and must carry the fields the settings page renders.
+     */
+    const response = await fetch(`${base}/gpt-sovits/api?action=status`)
+    assert(response.status === 200, `expected 200, got ${response.status}`)
+    const payload = await response.json()
+    assert(payload.ok === true, 'the status route must report ok')
+    for (const field of ['serverUrl', 'voiceName', 'textLang', 'speed', 'sampleSteps', 'activeGpt', 'activeSovits', 'audioCache']) {
+      assert(field in payload, `status is missing ${field}`)
+    }
+    assert(payload.greeting !== null && typeof payload.greeting === 'object', 'status must carry the greeting state')
+    assert(
+      ['idle', 'synthesizing', 'ready'].includes(payload.greeting.state),
+      `unexpected greeting state: ${payload.greeting.state}`,
+    )
+    assert(Array.isArray(payload.history), 'status must carry a synthesis history')
+    assert(typeof payload.busy === 'boolean', 'status must report whether the engine is busy')
+    return `engine busy=${payload.busy}, greeting=${payload.greeting.state}, history=${payload.history.length}`
+  })
+
+  await step('the logs route serves the engine console', async () => {
+    /*
+     * This replaces the API console window: the engine's stdout/stderr, the supervisor's
+     * decisions and the transcript. A separate window stole focus and, worse, closing it
+     * killed the engine, because that window *is* the process's console.
+     */
+    const response = await fetch(`${base}/gpt-sovits/api?action=logs&lines=120`)
+    assert(response.status === 200, `expected 200, got ${response.status}`)
+    const payload = await response.json()
+    assert(payload.ok === true, 'the logs route must report ok')
+    for (const section of ['engine', 'supervisor']) {
+      assert(payload[section] !== null && typeof payload[section] === 'object', `logs.${section} must be an object`)
+      assert(Array.isArray(payload[section].lines), `logs.${section}.lines must be an array`)
+      assert(typeof payload[section].path === 'string', `logs.${section}.path must name the file`)
+    }
+    assert(Array.isArray(payload.transcript), 'the console must also carry the transcript')
+    // The line limit is clamped, so a caller cannot ask for an unbounded read.
+    const clamped = await fetch(`${base}/gpt-sovits/api?action=logs&lines=99999`).then((r) => r.json())
+    assert(clamped.ok === true && clamped.engine.lines.length <= 2000, 'the line limit must be clamped')
+    return `engine ${payload.engine.lines.length} lines, supervisor ${payload.supervisor.lines.length} lines`
+  })
+
+  await step('the greeting is produced once the engine is idle, and polled into existence', async () => {
+    /*
+     * The user's design, verified as the client drives it: ask every 500 ms; the host
+     * answers immediately with a state, and only synthesizes once the engine is free.
+     *
+     * This is the behaviour every earlier timing guess failed to produce on a real
+     * machine. The assertions are therefore about the contract rather than the timing:
+     * every reply arrives immediately, carries a state, and the sequence terminates in a
+     * playable clip.
+     */
+    const started = Date.now()
+    let clip = null
+    let last = null
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const t0 = Date.now()
+      const response = await fetch(`${base}/gpt-sovits/api?action=greeting`)
+      const elapsed = Date.now() - t0
+      assert(response.status === 200, `expected 200, got ${response.status}`)
+      last = await response.json()
+      // Immediate: a poll that blocked on a cold engine would pile up behind it.
+      assert(elapsed < 3000, `the greeting route must answer immediately, took ${elapsed} ms`)
+      assert(typeof last.state === 'string', `every reply must carry a state, got ${JSON.stringify(last)}`)
+      if (last.ok === true && typeof last.url === 'string') {
+        clip = last
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+    assert(clip !== null, `the greeting never became ready; last reply was ${JSON.stringify(last)}`)
+    const audio = await fetch(`${base}${clip.url}`)
+    assert(audio.status === 200, `the greeting clip must be servable, got ${audio.status}`)
+    const bytes = Buffer.from(await audio.arrayBuffer())
+    assert(bytes.subarray(0, 4).toString('ascii') === 'RIFF', 'the greeting must be a real WAV')
+    return `${bytes.length} B in ${Date.now() - started} ms, final state ${clip.state}`
+  })
+
+  await step('a synthesis is recorded in the status history', async () => {
+    // The history is the field that answers "is it generating, and what?" — the
+    // question that previously needed a log file.
+    const before = await fetch(`${base}/gpt-sovits/api?action=status`).then((r) => r.json())
+    const synthesized = await fetch(`${base}/gpt-sovits/api?action=synthesize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '这一句应当出现在运行状况里。' }),
+    }).then((r) => r.json())
+    assert(synthesized.ok === true, `synthesis failed: ${synthesized.message ?? synthesized.error}`)
+
+    const after = await fetch(`${base}/gpt-sovits/api?action=status`).then((r) => r.json())
+    assert(after.history.length >= Math.min(before.history.length + 1, 1), 'the synthesis must appear in the history')
+    const newest = after.history[0]
+    assert(
+      typeof newest.text === 'string' && newest.text.includes('这一句应当出现在运行状况里'),
+      `unexpected newest entry: ${JSON.stringify(newest)}`,
+    )
+    assert(typeof newest.ms === 'number', 'the history entry must record how long synthesis took')
+    return `history ${before.history.length} -> ${after.history.length}, newest ${newest.ms} ms`
+  })
+
+  await step('the greeting route exists and is switchable', async () => {
+    const saved = await fetch(`${base}/gpt-sovits/api?action=settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: base },
+      body: JSON.stringify({ greetOnStart: false }),
+    }).then((r) => r.json())
+    assert(saved.ok === true, 'disabling the greeting must save')
+    assert(saved.settings.greetOnStart === false, `greetOnStart should be false, got ${saved.settings.greetOnStart}`)
+
+    // Disabled must answer without touching the engine: a user who turned it off
+    // should not pay for a synthesis just to be told it is off.
+    const off = await fetch(`${base}/gpt-sovits/api?action=greeting`).then((r) => r.json())
+    assert(off.ok === true && off.enabled === false, `a disabled greeting must answer enabled:false, got ${JSON.stringify(off)}`)
+
+    const on = await fetch(`${base}/gpt-sovits/api?action=settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: base },
+      body: JSON.stringify({ greetOnStart: true, greetText: '你好，欢迎回来' }),
+    }).then((r) => r.json())
+    assert(on.settings.greetOnStart === true, 'the greeting must be switchable back on')
+    assert(on.settings.greetText === '你好，欢迎回来', `greeting text did not persist: ${on.settings.greetText}`)
+
+    const greeting = await fetch(`${base}/gpt-sovits/api?action=greeting`).then((r) => r.json())
+    assert(greeting.enabled === true, 'an enabled greeting must report enabled:true')
+    assert(greeting.text === '你好，欢迎回来', `unexpected greeting text: ${greeting.text}`)
+    if (greeting.ok === true) {
+      assert(
+        typeof greeting.url === 'string' && greeting.url.startsWith('/gpt-sovits/audio/'),
+        'a synthesized greeting must carry a clip URL',
+      )
+      const clip = await fetch(`${base}${greeting.url}`)
+      assert(clip.status === 200, `the greeting clip must be servable, got ${clip.status}`)
+      return `enabled -> ${greeting.bytes} byte clip`
+    }
+    // A greeting that cannot be synthesized is a missing nicety, not a failure:
+    // it must answer 200 with ok:false so the caller stays unaware.
+    assert(greeting.error === 'greeting-failed', `an unsynthesizable greeting must report greeting-failed, got ${greeting.error}`)
+    return 'enabled -> reported failure, no throw'
+  })
+
   await step('ensure-engine starts the engine when it is down, and is a no-op when up', async () => {
     // Up: must not start a second engine.
     const running = await fetch(`${base}/gpt-sovits/api?action=ensure-engine`, { method: 'POST' })
