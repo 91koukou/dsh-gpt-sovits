@@ -25,16 +25,6 @@ runtime\python.exe api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infe
 
 ---
 
-## 合规与第三方声明
-
-- 本项目是**第三方社区插件**，与 DeepSeek、GPT-SoVITS（RVC-Boss）及其各自的维护者**无任何隶属、合作或背书关系**。"DeepSeek"、"DeepSeek Harness" 与 "GPT-SoVITS" 等名称归其权利人所有，此处仅为描述性使用。
-- 本插件**不分发、不托管任何模型权重、参考音频或合成音频**，也不包含任何语音克隆服务。它只是把你**自己**的本地引擎接到 DSH 界面上。
-- **仅可使用你有权使用的声音**：未经授权，不得克隆、模仿或合成公众人物、名人或他人的声音。参考音频与训练权重的权利与合规责任完全由使用者承担。
-- **合成音频可能被误认为真人发声**：对外分发时建议主动披露其为 AI 合成内容。
-- 本项目代码以 **MIT** 许可发布；你的模型、参考音频与生成音频**不在**该许可覆盖范围内。
-
----
-
 ## 为什么是"自己写"而不是装现成的
 
 同类插件确实存在，但都不满足"接 GPT-SoVITS 且带界面按钮"这个组合：
@@ -135,16 +125,17 @@ runtime\python.exe api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infe
 ## 开发与自检
 
 ```sh
-# 离线自检：语法、模块加载契约、slot 名、文本清洗与分块、store 形状、状态目录（15 项）
+# 离线自检：语法、模块加载契约、slot 名、文本清洗与分块、store 读取、状态目录（42 项）
 node scripts/selfcheck.mjs
 
-# 真实集成测试：起本地 HTTP 载体，用真引擎跑一遍全链路（10 项）
-# 默认针对「已安装的副本」——那才是真正在跑的那一半，也只有它有可解析的 node_modules
-node scripts/integration.mjs
+# 真实集成测试：起本地 HTTP 载体，用真引擎跑一遍全链路（12 项）
+# 默认优先测工作区源码；--source installed 则测「运行中的 DSH 实际加载的那一份」
+node scripts/integration.mjs --ref <你的参考音频.wav>
 node scripts/integration.mjs --skip-synthesis          # 不触网，只测路由与校验
-node scripts/integration.mjs --source workspace        # 改测工作区源码（需先有 node_modules）
-node scripts/integration.mjs --ref D:/path/ref.wav     # 指定参考音频
+node scripts/integration.mjs --ref ref.wav --gpt GPT_weights/your.ckpt --sovits SoVITS_weights/your.pth
 ```
+
+> `--ref` 是合成类检查的**必需**参数：本仓库不附带任何参考音频，请指向你自己的。
 
 `--experimental-vm-modules` 下自检还会额外做一次 ESM 解析（默认跳过该项）。
 
@@ -225,7 +216,59 @@ node scripts/integration.mjs --ref D:/path/ref.wav     # 指定参考音频
 
 ### 已知限制
 
-- **浏览器侧未做真机验证**：宿主半身与 HTTP 全链路已实测通过；按钮/设置页的渲染需要页面刷新后在浏览器里确认（本环境无法驱动浏览器）。slot 名与 prop 形状均取自本机 DSH（`0.2.0-rc.2`）自身的源码，不是猜测。
 - 合成缓存是进程内 `Map` + 落盘 WAV，上限 120 条；重启清空索引（WAV 仍在 `audio/`）。
 - 播放倍速依赖浏览器的 `preservesPitch`；不支持时锁定 1×（设置页会说明）。
 - `prompt_text` 留空时首次合成很慢（引擎要先做 ASR），之后走缓存恢复正常。
+
+---
+
+## 它是怎么来的
+
+**这只鲸鱼娘自己给自己装了一副嗓子。**
+
+这个插件的每一行代码，都是在 DSH 里由 **DeepSeek（`deepseek-flash`，DeepSeek 官方 provider）** 与作者对话逐轮写出来的 —— 包括读外壳源码确定槽位契约、量出 store 的真实结构、定位那串"看起来完全正常就是不响"的 bug，以及顶着一次次失败把 i18n、自检和集成测试补齐。
+
+作者做的事是：提需求、配好引擎和音色、在真机上点按钮、把报错截图发回来。**声音是作者训练的，嗓子是它自己装的。**
+
+值得注意的是，它一开始**并不了解自己的宿主**：第一次尝试把 `snapshot.legacy.nodes` 当成节点容器（那是另一个 DSH 版本、另一个插件留下的写法），连错四轮；最后是靠一个写进宿主的**诊断探针**把容器的真实成员列表打出来才修对。README 里那张"坑"表，就是这么攒出来的。
+
+---
+
+## 本机开发与验证环境
+
+以下是本插件**实际开发并全程验证通过**的环境。它是这份代码最有说服力的"最低配置参考"：
+
+| 项目 | 实际值 |
+|---|---|
+| 操作系统 | **Windows 11 专业版** `10.0.26200`（64 位） |
+| 宿主 | **DSH 桌面版**（Electron），profile = `desktop` |
+| 宿主客户端契约 | `@deepseek-ai/dsh-client-*` **0.2.0-rc.2** |
+| Node.js（插件运行时） | **v24.21.0**（DSH 自带运行时；`engines` 要求 `>=22`） |
+| GPU | **NVIDIA GeForce RTX 5070 Ti**，16303 MiB 显存，驱动 616.92 |
+| Python（引擎侧） | **3.9.13**（GPT-SoVITS 集成运行时） |
+| PyTorch / CUDA | **2.7.0+cu128** / **CUDA 12.8** |
+| GPT-SoVITS 检出 | `GPT-SoVITS-v2pro-20250604-nvidia50`（含 `GPT_weights` … `v4`、`SoVITS_weights` … `v4` 全部权重目录） |
+| 实测使用的模型版本 | **v2Pro** |
+| 引擎监听 | `http://127.0.0.1:9880` |
+| 插件版本 | v0.1.0 |
+
+**实测性能**（同一台机器，`sample_steps 32`、参考文本已填）：
+
+| 场景 | 耗时 |
+|---|---|
+| 引擎冷启动（加载权重） | 约 **12–30 秒** |
+| 首次合成（参考音未识别过） | 约 **20 秒** |
+| 之后的新句子 | **1.0–1.6 秒** |
+| 重复的句子（缓存命中） | **0 秒** |
+
+> 引擎侧显存占用实测约 **2.7 GB**（v2Pro 权重 + BERT + CNHuBERT）。
+
+---
+
+## 许可与第三方声明
+
+- 本项目是**第三方社区插件**，与 DeepSeek、GPT-SoVITS（RVC-Boss）及其各自的维护者**无任何隶属、合作或背书关系**。"DeepSeek"、"DeepSeek Harness" 与 "GPT-SoVITS" 等名称归其权利人所有，此处仅为描述性使用。
+- 本插件**不分发、不托管任何模型权重、参考音频或合成音频**，也不包含任何语音克隆服务。它只是把你**自己**的本地引擎接到 DSH 界面上。
+- **仅可使用你有权使用的声音**：未经授权，不得克隆、模仿或合成公众人物、名人或他人的声音。参考音频与训练权重的权利与合规责任完全由使用者承担。
+- **合成音频可能被误认为真人发声**：对外分发时建议主动披露其为 AI 合成内容。
+- 本项目代码以 **MIT** 许可发布；你的模型、参考音频与生成音频**不在**该许可覆盖范围内。
