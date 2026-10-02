@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Local runtime state — never commit: it holds your paths, your voice presets
+# and your reference audio.
+settings.json
+settings.local.bat
+*.local.bat
+audio/
+ref/
+diag.log
+engine-start.log
+
+# Reference audio and model weights. A reference clip carries a person's voice
+# and the weights carry a trained model; neither belongs in this repository.
+*.wav
+*.mp3
+*.flac
+*.ckpt
+*.pth
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp

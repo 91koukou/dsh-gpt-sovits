@@ -1,0 +1,22 @@
+# dsh-gpt-sovits —— DSH bundle patch
+# ---------------------------------------------------------------------------
+# 挂载声明：DSH 启动时按 bundle 层栈叠加各插件 patch，本文件把插件插入
+# profile 的配置树。
+#
+# 安装：
+#   dsh plugin --profile desktop add <本目录绝对路径>
+# 或（本地开发）：
+#   dsh plugin --profile desktop add link:<本目录绝对路径>
+#
+# 音色与引擎地址都在插件的设置页里改（落盘到 $DSH_HOME/gpt-sovits/settings.json），
+# 不需要手写 config。若要通过 patch 固定默认值，可解开下面的 config 块。
+# ---------------------------------------------------------------------------
+
+- insert:
+    - id: gpt-sovits
+      name: dsh-gpt-sovits
+      # config:
+      #   serverUrl: http://127.0.0.1:9880
+      #   defaultVoice: 默认
+      #   speed: 1.0
+      #   textLang: zh

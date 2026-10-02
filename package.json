@@ -1,0 +1,60 @@
+{
+  "name": "dsh-gpt-sovits",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GPT-SoVITS text-to-speech for the DeepSeek Harness web GUI: per-reply read-aloud, an auto-read toggle, native model switching and a settings page. Ships no model weights and no reference audio.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "tts",
+    "gpt-sovits",
+    "text-to-speech",
+    "voice"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat"
+      ]
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/USERNAME/dsh-gpt-sovits.git"
+  },
+  "bugs": {
+    "url": "https://github.com/USERNAME/dsh-gpt-sovits/issues"
+  },
+  "homepage": "https://github.com/USERNAME/dsh-gpt-sovits#readme",
+  "license": "MIT"
+}
