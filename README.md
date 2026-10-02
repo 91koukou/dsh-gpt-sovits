@@ -1,5 +1,7 @@
 # dsh-gpt-sovits
 
+**中文** · [English](./README.en.md)
+
 > ### 🐋 这只鲸鱼娘，自己给自己装了一副嗓子
 >
 > 本项目由 **DeepSeek（`deepseek-flash`）** 在 DSH 会话中逐轮写成 —— 出主意、修 bug、写测试、读宿主源码、量自己的宿主，都是它做的。
