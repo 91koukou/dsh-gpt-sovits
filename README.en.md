@@ -250,6 +250,25 @@ Regression coverage: a fake store, fake React effects and a fake `Audio` verify 
 
   Why it works this way: the official Windows package is an archive that people unpack wherever there is room — often a secondary drive root — so there is no fixed install location; and the path has to be readable by the **engine process**, which makes hand-typed paths error-prone.
 
+- **During a cold engine start, `ping 127.0.0.1` console windows flash on screen repeatedly** — this is **expected behaviour, not a fault**, but it is ugly.
+
+  It comes from the wait loop in the launcher, `start-engine.bat`: it uses `ping -n 4 127.0.0.1 >nul` as its delay (**`timeout` cannot be used** — it exits immediately when stdin is redirected, see the traps above). `ping.exe` is a console program, so **every poll spawns a new process**, and each one may flash a window. The longer the models take to load, the more flashes — typically **30–45** on a cold start (about 4 s apart, up to 60 tries).
+
+  | Situation | Flashes? |
+  |---|---|
+  | Engine **not yet up** when DSH starts | ✅ Yes, until the port answers |
+  | Engine **already running** | ❌ No — the launcher sees the port listening and **returns immediately without polling at all** |
+  | Started by the scheduled task / Startup folder | Normally no (`run-hidden.vbs` uses `shell.Run(..., 0, ...)` to hide the window), but it can still flash if the plugin's own path is running at the same time |
+
+  **To stop seeing it**, pick one:
+
+  1. **Start the engine before DSH** — while the engine is up, the plugin's path never polls (simplest)
+  2. **Let the engine start at logon** — the scheduled task or Startup folder brings it up, so the port is already listening by the time DSH starts
+  3. **Turn off the plugin's auto-start** — delete `GPT-SoVITS 语音引擎.lnk` from the Startup folder and launch `启动语音引擎.cmd` by hand instead
+  4. **Replace the delay** — swap `ping -n 4 127.0.0.1 >nul` on line 92 of `start-engine.bat` for another wait (for example PowerShell's `Start-Sleep`)
+
+  > Why this was not simply "fixed" in the plugin: with `windowsHide: true` combined with `detached: true`, whether a console window created by the child itself is suppressed varies across Windows versions. Getting that logic wrong costs a **dead engine and total silence**, which is far worse than a few flashing windows. So the behaviour and the ways out are documented here instead of gambling on a launcher that works.
+
 - The synthesis cache is an in-process `Map` plus WAV files on disk, capped at 120 entries; a restart clears the index (the WAVs stay in `audio/`).
 - Playback rate depends on the browser's `preservesPitch`; where it is missing, playback is pinned to 1× (the settings page says so).
 - With an empty `prompt_text` the first synthesis is slow (the engine transcribes the reference first); the cache covers it afterwards.
