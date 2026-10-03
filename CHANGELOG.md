@@ -6,7 +6,103 @@ All notable changes to this plugin are recorded here. The format follows
 
 ---
 
-## [0.2.0] — unreleased
+## [0.3.0] — 2026-10-03
+
+Six items, all reported from listening to the output. The theme is that the
+*rhythm* of speech was being decided by the engine rather than by the plugin:
+a sentence's own punctuation is the only thing that should say how long the pause
+after it is.
+
+### Added
+
+- **Per-sentence expression.** Speed, `temperature`, `top-k` and `top-p` are now
+  sent with every request, so a reading session can change pace or tone partway
+  through instead of committing at synthesis time. Adjustment is per-sentence by
+  design: a change applies from the next sentence, and nothing already spoken is
+  redone. Volume stays a playback property — it costs nothing to change and never
+  invalidates a synthesis.
+  - **Generation quality is deliberately excluded.** `sample_steps` and
+    `super_sampling` describe how much work the engine does, not how the voice
+    sounds; letting them differ per sentence would change fidelity halfway
+    through one answer.
+  - Measured on the real engine: `speed_factor = 1.3` shortened the same sentence
+    from 189484 B to 145964 B, and `temperature` at 0.3 and 1.5 produced different
+    lengths again — all four controls reach the engine.
+- **Pauses measured from the sentence's own punctuation**, with the engine's
+  trailing silence trimmed away: a full stop pauses, a comma barely does, a
+  paragraph break clearly longer, an ellipsis longest.
+- **The on-disk clip cache is reclaimed** on the first boot after upgrading, since
+  audio no longer touches the disk.
+
+### Changed
+
+- **Audio never touches the disk again.** Every clip used to be written to
+  `$DSH_HOME/gpt-sovits/audio/` and served as a static file — one small write per
+  sentence, for data played once and never read again. Clips now live in memory and
+  are served straight from the host, capped by both count and total bytes so a run
+  of long summaries cannot grow without bound.
+- **The engine is told to add no silence of its own** (`fragment_interval: 0`, was
+  the engine's default 0.3 s). That default was the real source of the long,
+  uneven gaps: a packed block handed over with `cut5` was still split inside the
+  engine, and every internal boundary added 0.3 s of its own.
+- **Sentence splitting no longer depends on the full stop alone.** Chinese has more
+  sentence terminators and they arrive in runs:
+  - `。！？；…` and their ASCII forms all end a sentence, as do runs of them
+    (`！？`, `……`) — splitting on those with a lookbehind produced
+    `他沉默了三秒…` plus a lone `…`, which the engine then spoke separately.
+  - A closing quote or bracket ends the sentence with the mark inside it:
+    `他说：“走吧。”` is one sentence, not one and a half.
+  - **A paragraph break is a hard boundary** and gets the longest pause. The
+    cleaning chain used to collapse every run of newlines into one, so a paragraph
+    was indistinguishable from a soft line wrap and the reader ran one thought into
+    the next.
+  - Merging short sentences is now deliberately rare. It caused "sentences that
+    should not be joined get joined", because merged text reaches the engine as one
+    request and the boundary between them is then outside the plugin's control.
+    Only a true fragment (≤10 characters) with no strong pause pending is merged.
+
+### Fixed
+
+- **Tables were read as minus signs.** Reported. A reply reaches this pipeline as raw
+  markdown, so a table arrived as pipes and dashes and the engine reads both aloud:
+  `| --- | --- |` became a run of "竖线 减号 减号 减号". Neither character is content — one is
+  a cell boundary, the other is how the format draws a line. The separator row is now dropped
+  entirely and the cells are joined with a comma, which the sentence splitter then treats as a
+  weak pause, so a row reads as a list of values.
+- **A referenced symbol was not spoken at all.** Reported. ``把 `;` 也作为切分符号`` lost the
+  semicolon: the engine drops a bare `;`, so the sentence was about a symbol it never said.
+  A symbol inside backticks is now spoken **by name** — 分号, 逗号, 句号, 左方括号 — while
+  punctuation *used* as punctuation keeps behaving as one. A code identifier is untouched:
+  `\`split\`` stays "split", because naming every character of a word would be nonsense.
+  - The name is masked and restored at the end, like a URL. That is not cosmetic: substituting
+    plain Chinese early would make a referenced `。` read as the word 句号 *and then act as a
+    sentence terminator*, splitting the sentence in the wrong place.
+- **The slash rule destroyed every rate and speed unit.** Reported: the generic rule reads
+  every slash as "或", which is right for `是/否` and wrong for a unit, where the slash means
+  "per". `120km/h` came out as `120km或h`, `3000r/min` as `3000r或min`, `100MB/s` as
+  `100MB或s` — the unit was gone and the sentence was nonsense.
+  - Fixed with a **unit table**, not cleverer pattern matching: the set of units is
+    open-ended, and a reader can extend a table while a regex encoding the same knowledge
+    would be unreadable. Compound units are rewritten **before** the slash rule.
+  - **Bare abbreviations are expanded too**, because a stray Latin abbreviation reaches the
+    engine as spelling: `2.4GHz` was read "2点4 G H z". Now 吉赫兹, 毫秒, 吉字节, and so on.
+    This runs *after* the file-extension rule, so `a.b.js` is still an extension, and it
+    requires a digit in front, so the `min` in "minimum" and the `s` in "things" are left
+    alone.
+  - Spacing inside a unit is accepted (`100 km / h`), and the quantity is consumed with the
+    unit — matching the unit alone re-emitted the number and read "120 120千米每小时".
+- **Switching workspace or session left the previous conversation being read**, and
+  every further switch appended to the same queue, so the queue grew without bound.
+  The turn counter cannot see this — another conversation is not a turn of this one
+  — so the conversation identity is tracked separately, with a transcript-shape
+  fallback for a build whose store exposes no session key.
+- **Sentences were joined that should have stayed apart** (see *Changed*).
+- **A sentence beginning with punctuation produced an empty first utterance**, which
+  the engine logged as `实际输入的目标文本: 。你好…` and synthesized as a stray pause.
+
+---
+
+## [0.2.0] — 2026-10-03
 
 Everything below was measured on a real machine and driven by reported symptoms,
 not guessed at. Each entry names the symptom that caused it, because several of

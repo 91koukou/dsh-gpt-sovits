@@ -34,6 +34,13 @@ function check(name, fn) {
     passes.push(`${name}${detail === undefined ? '' : ` — ${detail}`}`)
   } catch (error) {
     failures.push(`${name} — ${error instanceof Error ? error.message : String(error)}`)
+    /*
+     * A failed check reports only the message, which is usually right. When the message is a
+     * bare `X is not defined`, though, that is not enough to find it: the cause can be inside
+     * an evaluated block or a sandbox, far from the assertion. `SELFCHECK_STACK=1` prints the
+     * stack for exactly that case.
+     */
+    if (process.env.SELFCHECK_STACK === '1') console.error('STACK:', error instanceof Error ? error.stack : error)
   }
   return undefined
 }
@@ -895,6 +902,43 @@ await (async () => {
     return 'settled reply packed, streaming one sentence per request'
   })
 
+  await check('client: switching workspace or session cancels the reading', async () => {
+    /*
+     * Reported: after switching workspace the previous conversation kept being read, and
+     * every further switch appended to the same queue, so the queue grew without bound.
+     * The turn counter cannot see this -- another conversation is not a turn of this one --
+     * so the conversation identity is tracked separately, with a DOM fallback for a build
+     * whose store exposes no session key.
+     */
+    assert(/function selectSessionKey/.test(clientSource), 'the session key selector must exist')
+    assert(/SESSION_FIELDS/.test(clientSource), 'candidate field names must be probed')
+    assert(/session-seen/.test(clientSource), 'the first observation must not count as a change')
+    assert(/switch-reset-failed/.test(clientSource), 'a failed cancel must be reported, not swallowed')
+    assert(/function conversationFingerprint/.test(clientSource), 'the DOM fallback needs a fingerprint')
+    assert(/function findTranscriptRoot/.test(clientSource), 'the transcript must be found from our own anchor')
+    assert(/data-gpt-sovits-read-aloud/.test(clientSource), 'the read-aloud button must carry the anchor')
+    assert(/MutationObserver/.test(clientSource), 'the fallback must observe mutations')
+
+    // Both signals must cancel, and the store signal must win when it exists.
+    const sessionEffect = clientSource.slice(clientSource.indexOf('const sessionKey = safeSelect'));
+    assert(/player\.stop\(\)/.test(sessionEffect), 'a session change must stop playback')
+    assert(/CLAIMED\.clear\(\)/.test(sessionEffect), 'a session change must release the claims')
+    assert(/if \(sessionKey !== null && sessionKey !== undefined\) return undefined/.test(sessionEffect),
+      'the DOM fallback must stand down when the store provides a key')
+
+    /*
+     * `null` from a build with no such field must never be read as a change, or every
+     * render would cancel the reading.
+     */
+    const api = loadClient({ effects: false, env: fakeWindow() }).exports.__test
+    assert(api.selectSessionKey({ sessionId: 'a' }) === 'a', 'a string sessionId must be used')
+    assert(api.selectSessionKey({ activeConversationId: 'b' }) === 'b', 'an alternative field must be used')
+    assert(api.selectSessionKey({ workspaceId: 7 }) === '7', 'a numeric id must become a primitive')
+    assert(api.selectSessionKey({}) === null, 'no signal must be null')
+    assert(api.selectSessionKey(null) === null, 'a null snapshot must be null')
+    return 'store key probed, DOM fallback anchored on our own button'
+  })
+
   await check('client: a new turn cancels the previous turn queue', async () => {
     /*
      * The user's requirement, verbatim: entering a new round must cancel all the
@@ -1231,7 +1275,12 @@ function extractFunction(source, name) {
 const helpers = [
   'speakNormalize',
   'cleanForSpeech',
-  'splitIntoChunks',
+  'splitIntoSentences',
+  'tablesToProse',
+  'maskReferencedSymbols',
+  'splitIntoBlocks',
+  'segmentSentence',
+  'pauseKindOf',
   'blocksToText',
   'snapshotNodes',
   'isAssistantNode',
@@ -1244,10 +1293,74 @@ const helpers = [
 check('client: text helpers are present and callable', () => {
   const WORDS = { zh: { link: '链接', path: '路径', id: '编号', code: '长代码', codeBlock: '（代码块已省略）' } }
   const SENTENCE_SOFT_MAX = 280
+  const SENTENCE_MERGE_MAX = 10
+  const SENTENCE_BLOCK_MAX = 160
+  const PAUSE_MS = { paragraph: 520, period: 340, exclamation: 340, question: 340, ellipsis: 460, semicolon: 240, colon: 200, comma: 150, none: 120 }
+  const SENTENCE_END_RE = /[。！？!?；;…]+[”’"』」）)】》〉\]]*|$/g
+
+  /*
+   * The unit tables are lifted from the bundle rather than retyped, so a test can never
+   * pass against a stale copy of the data the plugin actually uses.
+   */
+  function liftBlock(marker) {
+    const start = clientSource.indexOf(marker)
+    assert(start !== -1, `missing block: ${marker}`)
+    let depth = 0
+    let seen = false
+    for (let index = start; index < clientSource.length; index += 1) {
+      const char = clientSource[index]
+      if (char === '{') { depth += 1; seen = true } else if (char === '}') {
+        depth -= 1
+        if (seen && depth === 0) {
+          const end = clientSource.indexOf(';', index)
+          return clientSource.slice(start, end === -1 ? index + 1 : end + 1)
+        }
+      }
+    }
+    throw new Error(`unbalanced block: ${marker}`)
+  }
+  /*
+   * Evaluate the lifted blocks, so the sandbox receives the *values* the bundle uses.
+   *
+   * Two things this has to get right, both learned the hard way:
+   *
+   * | Detail | Why |
+   * |---|---|
+   * | The value is evaluated, not the source text | Injecting the text left the bare identifiers undefined inside the sandbox, so the assertions ran against a rule that never fired and the unit tests "passed" while doing nothing |
+   * | Dependencies arrive as parameters | Both patterns are IIFEs that read `UNIT_WORDS`. Evaluating them in isolation threw `UNIT_WORDS is not defined`, which surfaced only as a failed check with no line number |
+   */
+  const liftValue = (marker, dependencies = {}) => {
+    const block = liftBlock(marker)
+    const expression = block.slice(block.indexOf('=') + 1).replace(/;\s*$/, '')
+    const names = Object.keys(dependencies)
+    // eslint-disable-next-line no-new-func
+    return new Function(...names, `return (${expression})`)(...names.map((name) => dependencies[name]))
+  }
+  const SYMBOL_NAMES = liftValue('const SYMBOL_NAMES = {')
+  const UNIT_WORDS = liftValue('const UNIT_WORDS = {')
+  const UNIT_PATTERN = liftValue('const UNIT_PATTERN = ', { UNIT_WORDS })
+  const ABBREVIATION_PATTERN = liftValue('const ABBREVIATION_PATTERN = ', { UNIT_WORDS })
+  assert(UNIT_WORDS['km/h'] === '千米每小时', 'the unit table must lift correctly')
+  assert(SYMBOL_NAMES[';'] === '分号', 'the symbol table must lift correctly')
+  assert(UNIT_PATTERN instanceof RegExp && ABBREVIATION_PATTERN instanceof RegExp, 'both unit patterns must lift')
+  // And they must actually match, not merely exist.
+  assert(UNIT_PATTERN.test('120km/h'), 'the compound-unit pattern must match a real unit')
+  assert(ABBREVIATION_PATTERN.test('2.4GHz'), 'the abbreviation pattern must match a real unit')
   const source = helpers.map((name) => extractFunction(clientSource, name)).join('\n')
-  const sandbox = { WORDS, SENTENCE_SOFT_MAX }
+  const sandbox = { WORDS, SENTENCE_SOFT_MAX, SENTENCE_MERGE_MAX, SENTENCE_BLOCK_MAX, PAUSE_MS, SENTENCE_END_RE, UNIT_WORDS, UNIT_PATTERN, ABBREVIATION_PATTERN }
+  /*
+   * The lifted constants must be *declared inside the context*, not merely handed in as
+   * sandbox properties. A property is a global the script can read; a `const` in that script
+   * is what `speakNormalize` closes over, and the two are not interchangeable.
+   */
+  const declarations = [
+    `const SYMBOL_NAMES = ${JSON.stringify(SYMBOL_NAMES)};`,
+    `const UNIT_WORDS = ${JSON.stringify(UNIT_WORDS)};`,
+    `const UNIT_PATTERN = ${UNIT_PATTERN.toString()};`,
+    `const ABBREVIATION_PATTERN = ${ABBREVIATION_PATTERN.toString()};`,
+  ].join('\n')
   vm.createContext(sandbox)
-  vm.runInContext(`${source}\nglobalThis.__h = { speakNormalize, cleanForSpeech, splitIntoChunks, blocksToText, selectText, selectLatestMessageId }`, sandbox)
+  vm.runInContext(`${declarations}\n${source}\nglobalThis.__h = { speakNormalize, cleanForSpeech, splitIntoSentences, splitIntoBlocks, segmentSentence, pauseKindOf, PAUSE_MS, UNIT_WORDS, blocksToText, selectText, selectLatestMessageId }`, sandbox)
   const api = sandbox.__h
 
   // The store shape measured on this install: `snapshot.nodes` is a Map.
@@ -1293,34 +1406,147 @@ check('client: text helpers are present and callable', () => {
   assert(!cleaned.includes('**'), 'emphasis markers must be stripped')
 
   /*
-   * One sentence per request. This is the fix for audio cut off mid-sentence:
-   * the old splitter packed sentences into a ~110-character buffer, which cut
-   * ordinary sentences in half and left the engine to re-split the request.
+   * One sentence per request, and the pause each sentence earns comes from its own
+   * punctuation. Sentences are objects now (`{ text, pause }`) because the engine's
+   * trailing silence is trimmed away and the gaps are inserted by the player.
    */
-  const chunks = api.splitIntoChunks('第一句。第二句！第三句？')
-  assert(chunks.length === 3, `each sentence must be its own request, got ${chunks.length}`)
-  assert(chunks[0] === '第一句。' && chunks[2] === '第三句？', `sentences split wrong: ${JSON.stringify(chunks)}`)
-  assert(chunks.every((chunk) => chunk.length <= SENTENCE_SOFT_MAX), 'no chunk may be unbounded')
+  const sentences = api.splitIntoSentences('第一句。第二句！第三句？')
+  assert(sentences.length === 3, `each sentence must stand alone, got ${sentences.length}`)
+  assert(sentences[0].text === '第一句。' && sentences[2].text === '第三句？', `split wrong: ${JSON.stringify(sentences)}`)
+  assert(sentences[0].pause === 'period' && sentences[1].pause === 'exclamation' && sentences[2].pause === 'question',
+    `pause kinds wrong: ${JSON.stringify(sentences.map((s) => s.pause))}`)
+
+  /*
+   * The reported bug: "sentences that should not be joined get joined". Chinese has more
+   * sentence terminators than a full stop, and runs of them are common; the first
+   * implementation split with a lookbehind and produced `他沉默了三秒…` plus a lone `…`.
+   */
+  const marks = api.splitIntoSentences('真的吗？当然！他沉默了三秒……然后走了；我也走了。')
+  assert(marks.length === 5, `Chinese terminators must separate sentences, got ${marks.length}: ${JSON.stringify(marks.map((s) => s.text))}`)
+  assert(marks[2].text === '他沉默了三秒……', `a terminator run must stay attached: ${marks[2].text}`)
+  assert(marks[2].pause === 'ellipsis', `an ellipsis earns its own pause: ${marks[2].pause}`)
+  assert(api.splitIntoSentences('他说：“走吧。”然后走了。').length === 2, 'a closing quote must end the sentence')
+
+  /*
+   * Merging is deliberately rare: it hands the boundary to the engine, so the
+   * per-sentence pause control is lost. Ordinary short sentences must stay apart.
+   */
+  const shortOnes = api.splitIntoSentences('好的。然后呢。完成了。')
+  assert(shortOnes.length === 3, `short sentences must keep their own pauses, got ${shortOnes.length}`)
+
+  /*
+   * A paragraph break is a hard boundary and gets the longest pause; the first
+   * implementation collapsed newline runs, so a paragraph was indistinguishable from a
+   * soft wrap and the reader ran one thought into the next.
+   */
+  const paras = api.splitIntoSentences('第一段的句子。\n\n第二段的句子。')
+  assert(paras.length === 2, `paragraphs must not merge, got ${paras.length}`)
+  assert(paras[0].pause === 'paragraph', `a paragraph must end on the long pause, got ${paras[0].pause}`)
+  assert(api.PAUSE_MS.paragraph > api.PAUSE_MS.period && api.PAUSE_MS.period > api.PAUSE_MS.comma,
+    'pauses must be ordered by the weight of the punctuation')
 
   // A sentence far over the soft max degrades at clause marks, not mid-word.
-  const runOn = api.splitIntoChunks(`很长的一句${'，从句内容'.repeat(60)}。`)
+  const runOn = api.splitIntoSentences(`很长的一句${'，从句内容'.repeat(60)}。`)
   assert(runOn.length > 1, 'an oversized sentence must still be broken up')
-  assert(runOn.every((chunk) => chunk.length <= SENTENCE_SOFT_MAX + 20), `clause chunks too long: ${runOn.map((c) => c.length)}`)
-  assert(runOn.every((chunk) => !chunk.startsWith('，')), 'a clause chunk must not start with its separator')
+  assert(runOn.every((entry) => entry.text.length <= SENTENCE_SOFT_MAX + 20), `clause chunks too long: ${runOn.map((entry) => entry.text.length)}`)
+  assert(runOn.every((entry) => !entry.text.startsWith('，')), 'a clause chunk must not start with its separator')
 
-  // Regression, seen in the engine's own log: it splits on trailing punctuation,
-  // so a chunk starting with `。` became an empty first sentence and the engine
-  // logged `实际输入的目标文本: 。你好…` and synthesized a stray pause.
-  const leading = api.splitIntoChunks('。你好，这是测试。音色已就绪。')
-  assert(leading[0] === '你好，这是测试。', `leading punctuation survived: ${JSON.stringify(leading[0])}`)
-  assert(leading.every((chunk) => !/^[。！？!?；;…，,、：:]/.test(chunk)), 'no chunk may start with punctuation')
-  assert(api.splitIntoChunks('\n\n  你好。\n\n').length === 1, 'whitespace must not create an empty chunk')
+  // Regression, seen in the engine's own log: a chunk starting with `。` became an empty
+  // first sentence and the engine logged `实际输入的目标文本: 。你好…`.
+  const leading = api.splitIntoSentences('。你好，这是测试。音色已就绪。')
+  assert(leading[0].text === '你好，这是测试。', `leading punctuation survived: ${JSON.stringify(leading[0].text)}`)
+  assert(leading.every((entry) => !/^[。！？!?；;…，,、：:]/.test(entry.text)), 'no sentence may start with punctuation')
+
+  // Settled packing keeps the pause of the block's last sentence.
+  const blocks = api.splitIntoBlocks(api.splitIntoSentences('第一句。第二句。第三句。'), SENTENCE_BLOCK_MAX)
+  assert(blocks.length >= 1, 'packing must produce at least one block')
+  assert(blocks.every((block) => typeof block.text === 'string' && typeof block.pause === 'string'), 'blocks carry text and pause')
+  assert(blocks[blocks.length - 1].pause === 'period', `the block keeps its last sentence's pause: ${blocks[blocks.length - 1].pause}`)
 
   /*
    * Symbol-to-speech rewriting. Each case here was reported from listening to the
    * output: the engine drops these symbols, so they have to become words.
    */
   const spoken = (input) => api.speakNormalize(input, WORDS.zh)
+  /** The full text stage, as the player runs it: normalise, then strip markdown. */
+  const clean = (input) => api.cleanForSpeech(input, WORDS.zh)
+
+  /*
+   * Units. Reported: the generic slash rule destroyed every rate and speed unit, because a
+   * slash inside a unit means "per", not "or" -- `120km/h` came out as `120km或h`. A second
+   * problem came with it: a bare abbreviation reached the engine as spelling, so `2.4GHz`
+   * was read "2点4 G H z".
+   *
+   * These also pin the ordering. The unit rule must run before the slash rule, and the
+   * abbreviation rule after the extension rule.
+   */
+  assert(spoken('速度 120km/h') === '速度 120千米每小时', `km/h: ${spoken('速度 120km/h')}`)
+  assert(spoken('转速 3000r/min') === '转速 3000转每分钟', `r/min: ${spoken('转速 3000r/min')}`)
+  assert(spoken('带宽 100MB/s') === '带宽 100兆字节每秒', `MB/s: ${spoken('带宽 100MB/s')}`)
+  assert(spoken('5m/s²') === '5米每秒平方', `m/s squared: ${spoken('5m/s²')}`)
+  // Spacing inside the unit is allowed and must reach the same table entry.
+  assert(spoken('100 km / h') === '100千米每小时', `spaced km / h: ${spoken('100 km / h')}`)
+  // The quantity is consumed with the unit; re-emitting it read "120 120千米每小时".
+  assert(!/\d+\s+\d+千米/.test(spoken('速度 120km/h')), 'the quantity must not be duplicated')
+  // Bare abbreviations.
+  assert(spoken('频率 2.4GHz') === '频率 2点4吉赫兹', `GHz: ${spoken('频率 2.4GHz')}`)
+  assert(spoken('刷新率 144Hz') === '刷新率 144赫兹', `Hz: ${spoken('刷新率 144Hz')}`)
+  assert(spoken('延迟 20ms') === '延迟 20毫秒', `ms: ${spoken('延迟 20ms')}`)
+  assert(spoken('内存 16GB') === '内存 16吉字节', `GB: ${spoken('内存 16GB')}`)
+  /*
+   * The abbreviation rule requires a digit in front, or ordinary words would be rewritten:
+   * "minimum" contains `min` and "things" contains `s`.
+   */
+  assert(spoken('minimum 的值') === 'minimum 的值', `minimum: ${spoken('minimum 的值')}`)
+  assert(spoken('things 很多') === 'things 很多', `things: ${spoken('things 很多')}`)
+  // A real file name is still an extension, not a unit.
+  assert(spoken('打开 a.b.js') === '打开 a.b点js', `extension must still win: ${spoken('打开 a.b.js')}`)
+  // A slash that really is a choice still reads as "或".
+  assert(spoken('按 是/否 回答') === '按 是或否 回答', `choice slash: ${spoken('按 是/否 回答')}`)
+  assert(spoken('中文/英文') === '中文或英文', `choice slash 2: ${spoken('中文/英文')}`)
+  // And a fraction still reads as one.
+  assert(spoken('3/4 杯') === '4分之3 杯', `fraction: ${spoken('3/4 杯')}`)
+  // The table must really be the one in the bundle, not a copy in this file.
+  assert(typeof UNIT_WORDS === 'object' && UNIT_WORDS !== null, `UNIT_WORDS must be an object, got ${typeof UNIT_WORDS}`)
+
+  /*
+   * Tables. Reported: the separator row was read as minus signs. The reply reaches this
+   * pipeline as raw markdown, so a table arrived as pipes and dashes and the engine reads
+   * both aloud. Neither is content: one is a cell boundary, the other is how the format
+   * draws a line.
+   */
+  assert(clean(spoken('| 名字 | 说明 |\n| --- | --- |\n| A | 第一项 |\n| B | 第二项 |')) === '名字，说明。 A，第一项。 B，第二项。',
+    `table prose: ${clean(spoken('| 名字 | 说明 |\n| --- | --- |\n| A | 第一项 |\n| B | 第二项 |'))}`)
+  assert(!spoken('| 名字 | 说明 |\n| --- | --- |\n| A | 第一项 |').includes('|'), 'no pipe may survive')
+  assert(!/[-—]{2,}/.test(spoken('| 名字 | 说明 |\n| --- | --- |\n| A | 第一项 |')), 'a separator row must not become dashes')
+  // A separator row with no data is punctuation only and must vanish entirely.
+  assert(clean(spoken('| --- | --- |')) === '', `lone separator: ${clean(spoken('| --- | --- |'))}`)
+  // A horizontal rule is still a rule, not table content.
+  assert(clean(spoken('文字\n\n---\n\n更多')) === '文字\n\n更多', `horizontal rule: ${clean(spoken('文字\n\n---\n\n更多'))}`)
+
+  /*
+   * A referenced symbol must be spoken by name. Reported: `把 \`;\` 也作为切分符号` lost the
+   * semicolon entirely, because the engine drops a bare `;` -- the sentence was about a
+   * symbol it never said. Punctuation *used* as punctuation must keep behaving as one.
+   */
+  assert(clean(spoken('把 `;` 也作为切分符号')) === '把 分号 也作为切分符号', `semicolon name: ${clean(spoken('把 `;` 也作为切分符号'))}`)
+  assert(clean(spoken('把 `,` 也作为切分符号')) === '把 逗号 也作为切分符号', `comma name: ${clean(spoken('把 `,` 也作为切分符号'))}`)
+  assert(clean(spoken('把 `;` `,` 都算')) === '把 分号 逗号 都算', `several names: ${clean(spoken('把 `;` `,` 都算'))}`)
+  assert(clean(spoken('用 `[` 和 `]` 包')) === '用 左方括号 和 右方括号 包', `bracket names: ${clean(spoken('用 `[` 和 `]` 包'))}`)
+  // A code identifier is not a symbol reference and must stay exactly as written.
+  assert(clean(spoken('把 `split` 也作为切分符号')) === '把 split 也作为切分符号', `identifier untouched: ${clean(spoken('把 `split` 也作为切分符号'))}`)
+  // Punctuation used as punctuation is unchanged.
+  assert(clean(spoken('第一句；第二句。')) === '第一句；第二句。', `ordinary punctuation: ${clean(spoken('第一句；第二句。'))}`)
+  /*
+   * The regression this design exists to avoid: the spoken name is masked, so a referenced
+   * full stop cannot become a sentence terminator and split the sentence in the wrong place.
+   */
+  const referencedStop = api.splitIntoSentences(clean(spoken('把 `。` 也作为切分符号')))
+  assert(referencedStop.length === 1, `a referenced full stop must not end a sentence, got ${referencedStop.length}`)
+  assert(referencedStop[0].text === '把 句号 也作为切分符号', `referenced stop text: ${referencedStop[0].text}`)
+  // The symbol table must come from the bundle too.
+  assert(SYMBOL_NAMES[';'] === '分号' && SYMBOL_NAMES['。'] === '句号', 'the symbol table must come from the bundle')
+
   assert(spoken('运行 cmd.exe 即可') === '运行 cmd点exe 即可', `cmd.exe: ${spoken('运行 cmd.exe 即可')}`)
   assert(spoken('把 3-10 改成 3 减 10') === '把 3到10 改成 3 减 10', `range: ${spoken('把 3-10 改成 3 减 10')}`)
   assert(spoken('3 ~ 10 之间') === '3到10 之间', `tilde range: ${spoken('3 ~ 10 之间')}`)
@@ -1350,7 +1576,7 @@ check('client: text helpers are present and callable', () => {
   const pipeline = api.cleanForSpeech(spoken('执行 cmd.exe'), WORDS.zh)
   assert(pipeline.includes('点exe'), `pipeline lost the extension: ${pipeline}`)
 
-  return `${chunks.length} sentences, markdown stripped, symbols spoken, Map and array stores honoured`
+  return `${sentences.length} sentences (pauses and paragraphs included), markdown stripped, symbols spoken, Map and array stores honoured`
 })
 
 check('client: the startup greeting is once per session and silent on failure', () => {
@@ -1416,6 +1642,36 @@ check('host: the engine console output is captured and readable', () => {
   assert(/stderr=subprocess\.STDOUT/.test(supervisorSource), 'stderr must be merged into the captured stream')
   assert(/options\.engine_log/.test(supervisorSource), 'the supervisor must honour --engine-log')
   return 'captured, served, stderr merged'
+})
+
+check('host: audio is served from memory, with the on-disk clips reclaimed', () => {
+  /*
+   * The user asked for this directly: stop wearing the drive. The previous design wrote a
+   * WAV per sentence and served it as a static file -- hundreds of small writes per reading
+   * session for data played once and never read again.
+   */
+  assert(!/writeFileSync\(join\(audioDir/.test(hostSource), 'nothing may write clips to disk any more')
+  assert(/const audioCache = new Map\(\)/.test(hostSource), 'the cache must be in memory')
+  assert(/AUDIO_CACHE_BYTES/.test(hostSource), 'a byte ceiling must exist, not just a count')
+  assert(/const evictAudio/.test(hostSource), 'eviction must be its own step')
+  assert(/audioCacheBytes/.test(hostSource), 'the byte total must be tracked')
+  assert(/purgeLegacyAudioFiles/.test(hostSource), 'the files an older version left must be reclaimed')
+  assert(/rmSync/.test(hostSource), 'the reclaim must actually delete')
+
+  // The route must read memory, never the filesystem.
+  const route = hostSource.slice(hostSource.indexOf('const handleAudio'))
+  assert(/audioCache\.get\(clipId\)/.test(route), 'the audio route must serve from the cache')
+  assert(!/readFileSync/.test(route.slice(0, route.indexOf('const mount'))), 'the audio route must not touch disk')
+
+  // Expression settings must reach the engine, and quality controls must stay fixed.
+  assert(/expressSettings\.temperature/.test(hostSource), 'temperature must be per request')
+  assert(/expressSettings\.topK/.test(hostSource), 'top-k must be per request')
+  assert(/expressSettings\.topP/.test(hostSource), 'top-p must be per request')
+  assert(/fragment_interval: 0/.test(hostSource), 'the engine must add no silence of its own')
+  assert(!/expressSettings\.sampleSteps/.test(hostSource), 'generation quality must NOT be per sentence')
+  assert(!/expressSettings\.superSampling/.test(hostSource), 'super sampling must NOT be per sentence')
+  assert(/const clamp =/.test(hostSource), 'per-request numbers must be clamped, not trusted')
+  return 'memory-only clips, byte-capped, expression per sentence, quality fixed'
 })
 
 check('host: the engine console is decoded as UTF-8, with a code-page fallback', () => {

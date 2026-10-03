@@ -8,7 +8,7 @@
 >
 > **The code is AI-written. The voice is trained by the author.**
 >
-> **Verification: all green** ✅ — 56 offline checks ✅ / 16 live-engine integration checks ✅ / button and auto-read confirmed by hand ✅
+> **Verification: all green** ✅ — 58 offline checks ✅ / 16 live-engine integration checks ✅ / button and auto-read confirmed by hand ✅
 >
 > Verified on: **Windows 11** · DSH desktop build (client contract `0.2.0-rc.2`) · Node **v24.21.0** · **RTX 5070 Ti (16 GB)** · Python **3.9.13** + torch **2.7.0+cu128** · GPT-SoVITS **v2Pro** @ `127.0.0.1:9880`
 >
@@ -64,10 +64,17 @@ The npm names `dsh-gpt-sovits` and `dsh-sovits` both returned 404 — the "upstr
 - **A new turn cancels the previous one**: keyed on the shell's own turn counter (`timeline.turnOrder`); a new turn `stop()`s playback, clears the queue and discards in-flight synthesis. **Nothing is interrupted within a turn.**
 - **No gaps between sentences**: while sentence N plays, N+1 and N+2 are already synthesizing (prefetch window 2); short sentences are merged when a reply settles instead of each costing a request.
 - **Symbols become speech**: `cmd.exe` → `cmd点exe`, `3-10` → `3到10`, `v2.7.0` → `v2点7点0`, `36.5` → `36点5`, `127.0.0.1` → `127点0点0点1`, `是/否` → `是或否`, `3/4` → `4分之3`, `C:\Users` → `C:杠Users`. Dates such as `2024-10-03` are preserved rather than read as a range.
+- **Units are read correctly**: `120km/h` → `120千米每小时`, `100MB/s` → `100兆字节每秒`, `3000r/min` → `3000转每分钟`, `5m/s²` → `5米每秒平方`; bare abbreviations are expanded too — `2.4GHz` → `2.4吉赫兹`, `144Hz` → `144赫兹`, `20ms` → `20毫秒`, `16GB` → `16吉字节`. A **table**, so adding a unit is one line; a slash inside a unit means "per", not "or".
+- **The pause between sentences comes from the punctuation**: the engine adds none of its own (`fragment_interval: 0`), the plugin trims each clip's trailing silence, then waits for the mark that ended the sentence — full stop 340 ms, comma 150 ms, ellipsis 460 ms, **paragraph 520 ms**.
+- **Complete Chinese sentence splitting**: `。！？；…` and runs of them (`……`, `！？`) all end a sentence, a closing quote belongs to the sentence it follows (`他说：“走吧。”` is one sentence), and **a paragraph is a hard boundary** that is never merged away.
+- **Switching workspace or session cancels the reading**: no more "the old conversation keeps being read and every switch queues more". The turn counter cannot see this — another conversation is not a turn of this one — so the conversation identity is tracked separately, with a transcript-shape fallback for a build that exposes no such field.
+- **Audio lives in memory**: no WAV per sentence is written to the drive any more; clips are served straight from memory under a dual ceiling of 240 entries and 64 MiB. Old files left by a previous version are reclaimed on upgrade.
+- **Per-sentence speed and expression**: speed, `temperature`, `top-k` and `top-p` are sent with **every sentence** and a change applies **from the next sentence**, so nothing already spoken is redone. Volume is a playback property, so changing it is instant and costs no synthesis. **Generation quality (sampling steps, super sampling) is deliberately not adjustable per sentence.**
 - **Text hygiene**: code fences are skipped whole, URLs/paths/hashes/long identifiers collapse to "link/path/id/code", Markdown markers and HTML tags are stripped — only what should be spoken is spoken.
 - **Voice presets**: name + GPT weights + SoVITS weights + reference clip + reference transcript; add and remove freely, pick a default. Weights are switched on demand (`set_gpt_weights` / `set_sovits_weights`) and **skipped when the pair is unchanged**, so a read does not reload the model every time.
 - **Settings page**: Settings → Voice (GPT-SoVITS). It opens with **live status** (engine, whether it is generating, greeting state, active voice and whether its reference clip exists, loaded weights) and the **engine console**; below that are engine URL, checkout directory, voices, language, speed, sampling steps, volume, playback rate and preview. Saving takes effect immediately.
-- **Engine console**: the engine's stdout/stderr (TTS config, weight loading, the target text of every synthesis, access lines, tracebacks) plus the launcher's decisions and the transcript of what was generated, **embedded in the settings page** with 1.5 s / 0.5 s / manual refresh. Chinese renders correctly as UTF-8.
+- **Tables are not read as separator lines**: a reply reaches the pipeline as raw markdown, so a table arrives with its pipes and `---` intact and the engine reads both aloud. The separator row is dropped whole and the cells are joined with a comma (a weak pause for the splitter), so a row reads as a list of values.
+- **A referenced symbol is spoken by name**: ``把 `;` 也作为切分符号`` used to **lose the semicolon** (the engine drops a bare `;`), so the sentence was about something it never said. A symbol inside backticks is now read as its name — 分号, 逗号, 句号, 左方括号 — while punctuation **used as punctuation** is unchanged. A code identifier is untouched (`split` stays "split").- **Engine console**: the engine's stdout/stderr (TTS config, weight loading, the target text of every synthesis, access lines, tracebacks) plus the launcher's decisions and the transcript of what was generated, **embedded in the settings page** with 1.5 s / 0.5 s / manual refresh. Chinese renders correctly as UTF-8.
 - **Same-origin short links**: synthesized audio is written to disk and served over a same-origin URL, so **audio bytes never enter the model's context**.
 - **Loopback only**: every route refuses non-loopback peers, write routes additionally check the origin, so nothing is exposed even when the host listens on 0.0.0.0.
 
@@ -102,6 +109,7 @@ Each release is anchored by a tag, so **an older version is never overwritten by
 |---|---|
 | [`v0.1.0`](https://github.com/91koukou/dsh-gpt-sovits/releases/tag/v0.1.0) | First release: per-reply read-aloud button, auto-read toggle, voice presets, settings page |
 | `v0.2.0` | Engine lifecycle follows DSH, symbol normalisation, streaming/summary split, queued reading, startup greeting, engine console |
+| `v0.3.0` | Full Chinese sentence terminators and paragraph boundaries, punctuation-driven pauses with the engine's trailing silence trimmed, a workspace switch cancels the reading, memory-only audio, per-sentence speed and expression |
 
 Per-version changes are listed in [CHANGELOG.md](./CHANGELOG.md).
 
@@ -168,7 +176,7 @@ The `/tts` body follows the `api_v2.py` contract: `media_type: "wav"`, `streamin
 
 ```sh
 # Offline: syntax, module-loading contract, slot names, text pipeline, store reads,
-# state directory, encoding (56 checks)
+# state directory, encoding (58 checks)
 node scripts/selfcheck.mjs
 
 # Live: real HTTP carrier plus the real engine, end to end (16 checks)
@@ -588,7 +596,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 
 > **The table below is the environment this code actually ran in with every test passing** — not a "recommended configuration", and not copied from documentation.
 >
-> Every row was measured on the machine; the **56 offline checks** and the **16 live-engine integration checks** both passed there, and the button and auto-read were confirmed by the author clicking them on this same machine.
+> Every row was measured on the machine; the **58 offline checks** and the **16 live-engine integration checks** both passed there, and the button and auto-read were confirmed by the author clicking them on this same machine.
 >
 > A different OS, DSH version or GPU is **plausible but untested** — if you hit trouble, please open an issue with your environment details.
 
@@ -604,7 +612,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 | GPT-SoVITS checkout | `GPT-SoVITS-v2pro-20250604-nvidia50` (with every `GPT_weights` … `v4` and `SoVITS_weights` … `v4` directory present) |
 | Model version actually used | **v2Pro** |
 | Engine endpoint | `http://127.0.0.1:9880` |
-| Plugin version | v0.2.0 |
+| Plugin version | v0.3.0 |
 
 **Measured latency** (same machine, `sample_steps 32`, reference transcript filled in):
 
@@ -666,7 +674,7 @@ lib/
 ├─ client.js       Client half: slot components, player and queue, text pipeline, settings UI
 └─ supervisor.py   Supervisor: windowless engine start, readiness wait, lifetime binding, log capture
 scripts/
-├─ selfcheck.mjs   56 offline checks (static assertions plus behavioural tests in a vm sandbox)
+├─ selfcheck.mjs   58 offline checks (static assertions plus behavioural tests in a vm sandbox)
 └─ integration.mjs 16 live checks (a real HTTP carrier plus the real engine)
 ```
 
@@ -865,20 +873,201 @@ next boot     → read engine.pid; if the recorded DSH is dead, reap the orphan 
 | `GET` | `?action=logs` | Engine output + launcher log + transcript (`&lines=N`, capped at 2000) |
 | `GET` | `/gpt-sovits/audio/<id>.wav` | Serve a synthesized clip (`id` is a content digest) |
 
-### 11. Synthesis cache
+### 11. Audio cache (in memory)
 
-- **Key**: a digest of `text + voice name + GPT weights + SoVITS weights + reference clip + reference transcript + reference language + text language + speed + sampling steps + engine URL`
-- **Two tiers**: an in-process `Map` (120 entries, FIFO eviction) plus WAV files on disk (`$DSH_HOME/gpt-sovits/audio/`)
-- **Why the weights are in the key**: the same sentence is a **different clip** under a different trained model, so the two must not be substituted for each other
+- **Key**: a digest of `text + voice name + GPT weights + SoVITS weights + reference clip + reference transcript + reference language + text language + speed + sampling steps + engine URL + per-sentence expression`
+- **Location**: **memory only** (`Map<clipId, {buffer, contentType, createdAt}>`), never on disk
+- **Ceilings**: 240 entries **and** 64 MiB total, oldest evicted first
+- **Why the weights are in the key**: the same sentence is a **different clip** under a different trained model
+- **Why the expression is too**: likewise, a different temperature is a different clip
 
-### 12. Self-check and integration tests
+### 12. Sentences and pauses (`PAUSE_MS` / `segmentSentence` / `splitIntoSentences`)
+
+**Sentences are matched, not split**:
+
+```js
+const SENTENCE_END_RE = /[。！？!?；;…]+[”’"』」）)】》〉\]]*|$/g
+```
+
+The terminator run and any trailing quote are in the same match, so `……`, `！？` and
+`……。”` stay with the sentence they end. Splitting with a lookbehind was tried first and
+produced `他沉默了三秒…` plus a lone `…`, which the engine then spoke as its own utterance.
+
+| Rule | Implementation |
+|---|---|
+| A paragraph is a hard boundary | Split on `\n\s*\n+` first; a single newline inside one is a soft wrap |
+| The paragraph's last sentence takes the longest pause | Its `pause` is rewritten to `paragraph` for every non-final paragraph |
+| An oversized sentence degrades | Above `SENTENCE_SOFT_MAX` (280) it breaks at clause marks, and its final part keeps the whole sentence's pause |
+| Merging is rare | Only when both sides are ≤ `SENTENCE_MERGE_MAX` (10) and no strong pause is pending |
+| Leading punctuation is stripped | `tidy()` removes a leading `。！？，…` — otherwise the engine speaks an empty sentence |
+
+**The plugin inserts the pauses and the engine adds none**:
+
+```js
+const PAUSE_MS = { paragraph: 520, period: 340, exclamation: 340, question: 340,
+                   ellipsis: 460, semicolon: 240, colon: 200, comma: 150, none: 120 };
+```
+
+The request sets `fragment_interval: 0`, turning off the engine's own inter-fragment
+silence (default **0.3 s**). That default was the real source of the long, uneven gaps: a
+block handed over with `cut5` is still split inside the engine, and **every internal
+boundary added 0.3 s of its own**.
+
+**Trimming the trailing silence** (`audibleEnd`):
+
+1. `fetch` the clip and `AudioContext.decodeAudioData` it
+2. Walk backwards for the first sample with `|sample| > 0.001`
+3. Add a 0.02 s margin so the final consonant is not clipped; that is `end`, in seconds
+4. During playback, `ontimeupdate` calls `pause()` at `end` and resolves manually, because `pause` does not fire `ended`
+
+The result is cached in `trimCache` (keyed by the content-addressed URL). Any failure
+returns `null`, which plays the whole clip: **better an untrimmed tail than a wrong cut**.
+
+### 13. Memory-only audio (`audioCache` / `evictAudio`)
+
+```js
+const audioCache = new Map()      // clipId -> { buffer, contentType, createdAt }
+let audioCacheBytes = 0
+const AUDIO_CACHE_LIMIT = 240
+const AUDIO_CACHE_BYTES = 64 * 1024 * 1024
+```
+
+| Item | Approach |
+|---|---|
+| Where it lives | **Memory only**; nothing is written to `$DSH_HOME/gpt-sovits/audio/` |
+| How it is served | `GET /gpt-sovits/audio/<id>.wav` answers with `res.end(entry.buffer)` |
+| Eviction | `evictAudio()` enforces a count **and** a total-byte ceiling, oldest first |
+| Re-insertion | The old byte count is subtracted and the entry re-inserted, moving it to the back of the order |
+| A cache miss | Answers `clip-missing` so the client re-requests, rather than an empty 200 |
+| Upgrading | `purgeLegacyAudioFiles()` runs once at boot and deletes the old `.wav` files, logging the count |
+
+**Why both ceilings**: a count alone lets one long summary grow without bound, and a byte
+ceiling alone would evict the clip currently playing when many short sentences arrive.
+
+### 14. Per-sentence parameters (`express` / `expressionSettings`)
+
+| Control | Engine field | Range |
+|---|---|---|
+| Speed | `speed_factor` | 0.5–2 |
+| Expression | `temperature` | 0.05–2, higher is more varied |
+| Sampling width | `top_k` | 1–100 |
+| Nucleus sampling | `top_p` | 0.05–1 |
+| Volume | — (a playback property) | Affects playback only; no synthesis, and not in the key |
+
+**Client**: `expressionSettings()` reads the current values on **every request**, so a
+change applies from the next sentence and nothing already spoken is redone.
+
+**Host**: `synthesize({ ..., express })` runs each value through `clamp()`, so the client is
+never trusted. The defaults are **byte-identical** to the behaviour before these controls
+existed, so a request that omits `express` is unchanged.
+
+**The cache key includes `expressKey`** — the same sentence at a different temperature is a
+**different clip**.
+
+**Deliberately excluded**: `sample_steps` and `super_sampling`. They describe how much work
+the engine does, not how the voice sounds, and letting them differ per sentence would change
+fidelity halfway through an answer. An assertion forbids them from entering `express`.
+
+### 15. Cancelling on a conversation switch (`selectSessionKey` + a DOM fallback)
+
+```
+session identity changes (store)  -> CLAIMED.clear() -> player.stop()
+   ^ when the build has no such field
+transcript shape changes (MutationObserver) -> the same
+```
+
+| Signal | Implementation |
+|---|---|
+| Primary | `selectSessionKey()` probes `sessionId` / `activeSessionId` / `conversationId` / `threadId` / `workspaceId` and one level of nesting; it returns only a primitive |
+| Fallback | `findTranscriptRoot()` walks up from **our own button** to the scrolling container (assuming no shell class names), and `conversationFingerprint()` compares its first child |
+| Precedence | When the store provides a key the fallback **stands down**, so two signals cannot fight |
+| First sight is not a change | `sessionKey === null` always means "this build has no such signal" and is **never** treated as a change — otherwise every render would cancel the reading |
+
+Anchor attributes: `data-gpt-sovits-read-aloud` (the button) and `data-gpt-sovits-auto-read`
+(the toggle).
+
+### 16. The unit table (UNIT_WORDS / UNIT_PATTERN / ABBREVIATION_PATTERN)
+
+**The problem**: the generic slash rule read the slash *inside a unit* as "or".
+
+| Input | Before | After |
+|---|---|---|
+| `120km/h` | `120km或h` ❌ | `120千米每小时` ✅ |
+| `3000r/min` | `3000r或min` ❌ | `3000转每分钟` ✅ |
+| `100MB/s` | `100MB或s` ❌ | `100兆字节每秒` ✅ |
+| `5m/s²` | `5m或s²` ❌ | `5米每秒平方` ✅ |
+| `2.4GHz` | `2点4GHz` (the engine spells it "G H z") ❌ | `2点4吉赫兹` ✅ |
+
+**A table rather than cleverer pattern matching**: the set of units is open-ended, so adding
+one is a single line, while a regex encoding the same knowledge would be unreadable and would
+fail on the next unit anyone adds.
+
+**Four rules, each one a bug first**:
+
+| Rule | Why |
+|---|---|
+| Runs **before** the slash rule | A slash inside a unit means "per", not "or" |
+| The quantity is **inside the match** | Matching the unit alone left the number in the string and the replacement re-emitted it as "120 120千米每小时" |
+| **Space allowed** inside the unit | `100 km / h` is a normal spelling; the captured text is compacted before the lookup, so one key covers both |
+| Terminated by `(?![A-Za-z0-9])`, **not `\b`** | `km/h` ends in a letter, so `\b` failed against a following space and the rule **never fired at all** |
+
+**Bare abbreviations** (the second rule) run **after** the extension rule and **before** the
+decimal rule, and require a digit in front — so `a.b.js` is still an extension, and the `min`
+in "minimum" and the `s` in "things" are untouched.
+
+**Case**: the table is consulted as written first, then lower-cased, so `MB` (megabyte) and
+`Mb` (megabit) can differ while `GHz`/`ghz` needs only one entry.
+
+**Both patterns are derived from the table** (`Object.keys(UNIT_WORDS)`), so the two cannot
+disagree. The self-check lifts and evaluates the *same* table from the bundle rather than
+keeping a copy in the test file.
+
+**To add a unit**: one line in `UNIT_WORDS`; both patterns follow automatically.
+### 17. Tables and referenced symbols (tablesToProse / SYMBOL_NAMES / maskReferencedSymbols)
+
+**Problem one: a table's separator row was read as minus signs.**
+
+A reply reaches this pipeline as **raw markdown** (the shell stores it as text), so a table
+arrives with its pipes and `---` intact and the engine reads both aloud.
+
+`tablesToProse()` runs **before every other rule**:
+
+| Rule | Implementation |
+|---|---|
+| Recognise a table line | `/^\s*\|.*\|\s*$/` |
+| **Drop the separator row** | `/^\s*\|(?:\s*:?-{2,}:?\s*\|)+\s*$/` — it is typography, not content |
+| Join the cells | With a **comma**, which the splitter treats as a weak pause, so a row reads as a list of values |
+| Discard empty rows | A row of empty cells leaves no residue |
+
+**Problem two: a referenced symbol was not spoken at all.**
+
+`` 把 `;` 也作为切分符号 `` used to **lose the semicolon** — the engine drops a bare `;`, so the
+sentence was about something it never said. DSH draws an inline reference as a box, which is
+markdown **inline code**, so that is where the fix goes:
+
+| Case | Handling |
+|---|---|
+| Backticks containing **only symbols** | Replaced with the **name**: `;` → 分号, `,` → 逗号, `。` → 句号, `[` → 左方括号 |
+| Backticks containing a **code identifier** | **Left exactly as written** — naming every character of a word would be nonsense, and the engine reads an ASCII word fine |
+| Punctuation **used as punctuation** | Unchanged |
+
+**Why the name is masked**: the name is ordinary Chinese, and substituting it early would make
+a referenced `。` read as the word 句号 *and then act as a sentence terminator*, splitting the
+sentence in the wrong place. So it borrows the URL masking mechanism and is restored at the
+very end. An assertion covers exactly this: `` 把 `。` 也作为切分符号 `` must be **one** sentence.
+
+**The table** covers ASCII and full-width forms: `；，。、：！？…—-_~|/\()[]{}<>《》「」""''#@$%^&*+=`
+plus `×÷≤≥≠≈∞→←↑↓√°℃` and more, over sixty entries.
+### 18. Self-check and integration tests
 
 | | Offline self-check | Live integration test |
 |---|---|---|
-| File | `scripts/selfcheck.mjs` | `scripts/integration.mjs` |
-| Checks | **56** | **16** |
-| Method | Static assertions plus real functions executed in a `vm` sandbox | A local HTTP carrier that routes by `kind`/`path`, driving the real engine |
-| Covers | Syntax, module contract, slot names, text pipeline, (de)serialization, encoding, store reading, deadlock and hook-order guards | Route contract, validation, weight switching, greeting polling, status/logs, synthesis and caching |
-| Needs no engine | ✅ | Partly, with `--skip-synthesis` |
+| Checks | **58** | **16** |
+| Method | Static assertions plus real functions executed in a `vm` sandbox | A local HTTP carrier driving the real engine |
 
-**What the sandbox buys**: it asserts **behaviour**, not text. The queue test, for instance, makes `stop()` **throw** — so if the implementation ever stops playback while a reply grows, the test fails immediately.
+New assertions cover: sentence splitting (Chinese terminators, runs of them, the paragraph
+hard boundary, pause ordering), leading punctuation, `trimCache` and `audibleEnd`, memory-only
+audio (no `writeFileSync` into the audio directory, the byte ceiling, reclaiming old files),
+per-sentence parameters (all three reaching the request, quality controls excluded, values
+clamped), and the conversation switch (both signals, when the fallback stands down, `null` not
+counting as a change).
