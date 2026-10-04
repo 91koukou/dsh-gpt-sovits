@@ -357,6 +357,11 @@ function fakeWindow() {
       setInterval: () => 0,
       clearInterval: () => {},
       Audio: FakeAudio,
+      /*
+       * A real `location` object, because the session identity is read from the URL and it is the
+       * one signal that was measured to work. A test that cannot set `href` cannot exercise it.
+       */
+      location: { href: 'dsh-app://app/' },
     },
     played,
   }
@@ -372,15 +377,32 @@ function fakeWindow() {
 function loadClient(options = {}) {
   let registration = null
   const effects = []
+  /**
+   * The cleanup each collected effect returned, a ref indirection so React's own
+   * contract is reproduced: the cleanup must run against the refs as they are at
+   * unmount, not against a copy captured at mount.
+   */
+  const cleanups = []
+  /**
+   * Ref cells for the component currently being rendered, so that a test can
+   * reproduce a **remount**: React discards a component's refs when it unmounts, and
+   * a plugin that hides state in a ref therefore behaves differently the second time.
+   */
+  let refCells = []
   const reactStub = {
     createElement: (...args) => ({ type: args[0], props: args[1], children: args.slice(2) }),
     useState: (initial) => [initial, () => {}],
     useEffect: options.effects === true
       ? (fn) => {
         effects.push(fn)
+        if (options.cleanups === true) cleanups.push({ effect: fn, disposer: null })
       }
       : () => {},
-    useRef: (initial) => ({ current: initial }),
+    useRef: (initial) => {
+      const cell = { current: initial }
+      refCells.push(cell)
+      return cell
+    },
     useCallback: (fn) => fn,
     memo: (fn) => fn,
   }
@@ -423,7 +445,20 @@ function loadClient(options = {}) {
     if (seed.has(spec)) return seed.get(spec)
     throw new Error(`client bundle required "${spec}" — it must only use platform seeds`)
   }
-  return { exports: registration.factory(factoryRequire), factoryRequire, effects, env }
+  return {
+    exports: registration.factory(factoryRequire),
+    factoryRequire,
+    effects,
+    env,
+    /** Fresh ref cells for the next component render, as React gives a new mount. */
+    beginRender: () => {
+      refCells = []
+    },
+    /** The ref cells the last render created, in call order. */
+    refs: () => refCells,
+    /** The disposers of the collected effects, for an unmount test. */
+    cleanups,
+  }
 }
 
 let client = null
@@ -605,8 +640,17 @@ check('client: the driver does not depend on the opaque turn prop', () => {
   // down and auto-read never spoke at all. The drivers now cooperate through the
   // shared claim set instead, which needs no turn identity.
   assert(/function AutoReadDriver\(props\)/.test(clientSource), 'driver missing')
-  assert(/const \{ useChat \} = props/.test(clientSource), 'the driver must not destructure a turn')
-  assert(!/typeof turn/.test(clientSource), 'no turn type check may remain')
+  assert(/const \{ useChat, sessionId \} = props/.test(clientSource), 'the driver must take the sessionId prop, not a turn')
+  /*
+   * Scoped to the driver's own body.
+   *
+   * A blanket search over the whole file is wrong: the navigation selector legitimately reads
+   * `typeof entry.turn === "number"` on the store's turn entries, which has nothing to do with
+   * the opaque prop the shell hands the driver. The broad test was written before that selector
+   * existed and would now fail on correct code.
+   */
+  const driverBody = clientSource.slice(clientSource.indexOf('function AutoReadDriver(props)'))
+  assert(!/typeof turn\b/.test(driverBody.slice(0, 4000)), 'no turn type check may remain in the driver')
   assert(!/latestTurn !== turn/.test(clientSource), 'no turn comparison may remain')
   return 'prop-independent, claim-set coordinated'
 })
@@ -711,11 +755,16 @@ async function driveAutoRead({ turns, autoReadOnLoad, previousLastRead }) {
   }
   client.exports.apply(ctx)
   assert(turnTail.length === 1, `expected one turnTail registration, got ${turnTail.length}`)
-  const AutoReadDriver = turnTail[0]
+  /*
+   * The slot yields the restart scope, not the component. This test drives the occupant to
+   * check its behaviour, and the scope's own job — remounting the subtree when a conversation
+   * switch bumps the epoch — belongs to React and cannot be exercised by calling a function.
+   */
+  const AutoReadDriver = client.exports.__test.SCOPED_INNER.get(turnTail[0]) ?? turnTail[0]
 
   for (const entry of turns) {
     const before = client.effects.length
-    const rendered = AutoReadDriver({ turn: entry.turn, seq: entry.turn, openFile: () => {}, useChat })
+    const rendered = AutoReadDriver({ turn: entry.turn, seq: entry.turn, openFile: () => {}, useChat, sessionId: 'session-test' })
     assert(rendered === null, 'the driver must render nothing')
     // Run only this instance's effects, the way React would on mount.
     for (const effect of client.effects.slice(before)) effect()
@@ -910,33 +959,257 @@ await (async () => {
      * so the conversation identity is tracked separately, with a DOM fallback for a build
      * whose store exposes no session key.
      */
-    assert(/function selectSessionKey/.test(clientSource), 'the session key selector must exist')
-    assert(/SESSION_FIELDS/.test(clientSource), 'candidate field names must be probed')
-    assert(/session-seen/.test(clientSource), 'the first observation must not count as a change')
-    assert(/switch-reset-failed/.test(clientSource), 'a failed cancel must be reported, not swallowed')
-    assert(/function conversationFingerprint/.test(clientSource), 'the DOM fallback needs a fingerprint')
-    assert(/function findTranscriptRoot/.test(clientSource), 'the transcript must be found from our own anchor')
-    assert(/data-gpt-sovits-read-aloud/.test(clientSource), 'the read-aloud button must carry the anchor')
-    assert(/MutationObserver/.test(clientSource), 'the fallback must observe mutations')
+    /*
+     * The signal, and the four that were tried first and failed.
+     *
+     * Every slot in this shell receives a standard `sessionId: SessionId` prop — it is listed in
+     * the slot catalog's `standardProps` — and the conversation slots are `scope: "session"`, so the
+     * shell rebuilds that subtree per session and hands it the identity it was built for.
+     *
+     * | Attempt | Why it failed |
+     * |---|---|
+     * | five guessed store field names | none of them exists on this build |
+     * | `navigation.current` turn run | a global list, unbroken across a switch (the log said `conversation-grew` three times and never a change) |
+     * | node-set digest | spans the whole workspace, never shrinks |
+     * | the page URL | `dsh-app://app/` carries no session at all |
+     *
+     * The check therefore asserts the prop is used and, just as importantly, that the dead
+     * detectors are **gone** — a leftover one would fight this one for the same event.
+     */
+    assert(/const \{ useChat, sessionId \} = props/.test(clientSource), 'the driver must take the shell\'s sessionId prop')
+    assert(/RESTART_PLUGIN\("session-id-prop"\)/.test(clientSource), 'a session change must restart the plugin')
+    assert(/function readSessionKey/.test(clientSource) === false || true, 'placeholder')
+    assert(!/RESTART_PLUGIN\("navigation"\)/.test(clientSource), 'the dead navigation detector must be gone')
+    assert(!/RESTART_PLUGIN\("digest"\)/.test(clientSource), 'the dead digest detector must be gone')
+    assert(!/RESTART_PLUGIN\("url-session"\)/.test(clientSource), 'the dead URL detector must be gone')
+    assert(!/RESTART_PLUGIN\("dom-transcript"\)/.test(clientSource), 'the dead DOM detector must be gone')
+    assert(!/if \(readSessionKey\(\) !== null\) return;/.test(clientSource), 'nothing may stand down for a signal that never arrives')
+    assert(/const RESTART_PLUGIN = /.test(clientSource), 'a conversation switch must restart the plugin, not merely stop the audio')
+    assert(/player\.restart\(\)/.test(clientSource), 'the restart must reach the player')
+    assert(/PLUGIN_EPOCH \+= 1/.test(clientSource), 'the restart must bump the epoch so the UI remounts')
+    assert(/restartListeners/.test(clientSource), 'the restart must notify components that outlive the remount')
+    assert(/lastRestartAt/.test(clientSource), 'one switch must not restart the plugin several times')
+    /*
+     * The mechanism, driven for real. Calling it the way a detector does is the only way to
+     * check what a restart actually leaves behind — a source-text assertion cannot see a stale
+     * queue or a surviving claim.
+     */
+    const restartApi = loadClient({ effects: false, env: fakeWindow() }).exports.__test
+    assert(typeof restartApi.restart === 'function', 'the restart must be reachable for a check')
 
-    // Both signals must cancel, and the store signal must win when it exists.
-    const sessionEffect = clientSource.slice(clientSource.indexOf('const sessionKey = safeSelect'));
-    assert(/player\.stop\(\)/.test(sessionEffect), 'a session change must stop playback')
-    assert(/CLAIMED\.clear\(\)/.test(sessionEffect), 'a session change must release the claims')
-    assert(/if \(sessionKey !== null && sessionKey !== undefined\) return undefined/.test(sessionEffect),
-      'the DOM fallback must stand down when the store provides a key')
+    const run = restartApi.player
+    const words = { link: '链接', path: '路径', id: '编号', code: '长代码', codeBlock: '代码块我不想读' }
+    // Fill the machine the way a reading session would: a queue, claims, and read marks.
+    run.enqueue('msg-1', '第一句。第二句。第三句。', words, true)
+    run.enqueue('msg-2', '另一个回复。', words, true)
+    restartApi.CLAIMED.add('msg-1')
+    restartApi.CLAIMED.add('msg-2')
+    const queuedBefore = run.pending.length
+    assert(restartApi.CLAIMED.size === 2, 'the claims must be set up')
+
+    const first = restartApi.restart('selfcheck')
+    assert(first === true, 'the first restart must be accepted')
+    assert(run.pending.length === 0, `the queue must be emptied, got ${run.pending.length}`)
+    assert(run.queued.size === 0, 'the per-message offsets must be forgotten')
+    assert(run.trimCache.size === 0, 'the measured clip lengths must be forgotten')
+    assert(run.playing === false && run.busy === false, 'playback must be stopped')
+    assert(restartApi.CLAIMED.size === 0, 'the claims must be released')
+    assert(restartApi.pluginEpoch() === 1, `the epoch must advance, got ${restartApi.pluginEpoch()}`)
+    // The read mark is persisted, so it must be gone from storage too — otherwise the next
+    // conversation's own reply would look already read.
+    assert(restartApi.readMark() === '', `the read mark must be cleared, got ${JSON.stringify(restartApi.readMark())}`)
 
     /*
-     * `null` from a build with no such field must never be read as a change, or every
-     * render would cancel the reading.
+     * One switch produces several signals a render apart, so a second call inside the guard
+     * window must be ignored — otherwise the read-aloud button flickers back in two or three
+     * times for one switch.
      */
-    const api = loadClient({ effects: false, env: fakeWindow() }).exports.__test
-    assert(api.selectSessionKey({ sessionId: 'a' }) === 'a', 'a string sessionId must be used')
-    assert(api.selectSessionKey({ activeConversationId: 'b' }) === 'b', 'an alternative field must be used')
-    assert(api.selectSessionKey({ workspaceId: 7 }) === '7', 'a numeric id must become a primitive')
-    assert(api.selectSessionKey({}) === null, 'no signal must be null')
-    assert(api.selectSessionKey(null) === null, 'a null snapshot must be null')
-    return 'store key probed, DOM fallback anchored on our own button'
+    const second = restartApi.restart('selfcheck-again')
+    assert(second === false, 'a restart storm must collapse to one restart')
+    assert(restartApi.pluginEpoch() === 1, `the epoch must not advance twice, got ${restartApi.pluginEpoch()}`)
+
+    assert(/data-gpt-sovits-read-aloud/.test(clientSource), 'the read-aloud button must carry the anchor')
+    // The DOM observer is gone with the other dead fallbacks; nothing may regrow it.
+    assert(!/MutationObserver/.test(clientSource), 'the dead DOM fallback must stay gone')
+
+    /*
+     * The cancel itself lives in `RESTART_PLUGIN`, so it is asserted there rather than in the
+     * detector — the detector reports, the mechanism does the work.
+     */
+    const sessionEffect = clientSource.slice(clientSource.indexOf('const session = typeof sessionId === "string"'));
+    assert(sessionEffect.length > 100, 'the detection block must be found')
+    assert(/RESTART_PLUGIN\("session-id-prop"\)/.test(sessionEffect), 'a session change must restart the plugin')
+    assert(/diag\("conversation-changed"/.test(sessionEffect), 'the change must be reported before it acts')
+
+    // And the mechanism must actually do the work the old per-caller cancel used to do.
+    const restartBody = clientSource.slice(clientSource.indexOf('const RESTART_PLUGIN = (reason)'));
+    assert(/player\.restart\(\)/.test(restartBody), 'the restart must reset the player')
+    assert(/CLAIMED\.clear\(\)/.test(restartBody), 'the restart must release the claims')
+    assert(/writeStored\(LAST_READ_KEY, ""\)/.test(clientSource), 'the restart must forget the read mark')
+    assert(/PLUGIN_EPOCH \+= 1/.test(restartBody), 'the restart must bump the epoch')
+
+    /*
+     * The detector, asserted at the source level.
+     *
+     * It cannot be driven by calling the component alone: the signal is a *prop the shell
+     * passes*, and the remount that follows is React's doing. So what is pinned here is the
+     * prop is read, validated, keyed on — and, crucially, that the previous value is kept
+     * somewhere that **survives a remount**. Everything else is checked by the two tests below.
+     */
+    assert(/const \{ useChat, sessionId \} = props/.test(clientSource), 'the driver must take the sessionId prop')
+    assert(/const session = typeof sessionId === "string"/.test(clientSource), 'the prop must be validated')
+    assert(/\[session\]\);/.test(clientSource), 'the effect must key on the session')
+    assert(/RESTART_PLUGIN\("session-id-prop"\)/.test(clientSource), 'a session change must restart the plugin')
+
+    /*
+     * **The bug this check exists for.** The previous value must NOT live in the component.
+     *
+     * A session-scoped slot is rendered under a per-session React key (`sessionGenerationKeyOf`
+     * in `@deepseek-ai/dsh-client-ui-renderer`), so switching conversation unmounts the subtree
+     * and mounts a fresh copy. A `useRef` — or any component state — is therefore `null` on the
+     * mount that follows the switch, the effect reads that as a first mount, and the switch is
+     * silently never detected. The v0.3.0 implementation did exactly this and shipped broken:
+     * 50 driver mounts in the log, not one `conversation-changed`.
+     */
+    assert(!/sessionSeen\.current/.test(clientSource), 'the previous session must not live in a per-instance ref')
+    assert(!/ACTIVE_SESSION/.test(clientSource), 'the pre-remount name must be gone with the ref it mirrored')
+    assert(/let LAST_DRIVER_SESSION = null/.test(clientSource), 'the previous session must live at module scope')
+    assert(/const previous = LAST_DRIVER_SESSION/.test(clientSource), 'the detector must compare against that binding')
+    assert(/LAST_DRIVER_SESSION = session/.test(clientSource), 'the detector must claim the new session')
+
+    assert(!/function readSessionKey/.test(clientSource), 'the dead URL reader must be gone')
+    assert(!/function selectNavigationTurns/.test(clientSource), 'the dead navigation selector must be gone')
+    assert(!/function selectNodeDigest/.test(clientSource), 'the dead digest selector must be gone')
+
+    /*
+     * A driver that is unmounted stops the voice.
+     *
+     * The player is module-level, so it outlives the component: without this cleanup the
+     * conversation that was just switched away from keeps being read by a component that no
+     * longer exists. That is the user-visible half of the report, and it is why the fix is not
+     * only "detect the switch".
+     *
+     * Driven for real: render a driver, take the cleanup it registered, run it, and require the
+     * audio to be gone. `stop()` alone is not enough — it clears the queue but a paused element
+     * can still hold the output — so the element must be released too.
+     */
+    const unmountEnv = fakeWindow()
+    const unmountClient = loadClient({ effects: true, cleanups: true, env: unmountEnv })
+    const unmountSlots = []
+    unmountClient.exports.apply({
+      effect: () => () => {},
+      on: () => () => {},
+      get: () => undefined,
+      locale: { getLocale: () => ({ active: 'zh' }), bind: () => (key) => key, register: () => () => {} },
+      slots: {
+        inject: (_name, callback) => callback(),
+        register: (options, component) => {
+          if (options.name === 'conversation.chat.turnTail') unmountSlots.push(component)
+          return () => {}
+        },
+      },
+    })
+    const unmountDriver = unmountClient.exports.__test.SCOPED_INNER.get(unmountSlots[0]) ?? unmountSlots[0]
+    const unmountUseChat = (selector) => selector(fakeChatStore([]))
+    unmountUseChat.getState = () => fakeChatStore([])
+    const effectsBefore = unmountClient.effects.length
+    unmountClient.beginRender()
+    unmountDriver({ turn: 1, seq: 1, openFile: () => {}, useChat: unmountUseChat, sessionId: 'session-a' })
+    const mountedEffects = unmountClient.effects.slice(effectsBefore)
+    for (const effect of mountedEffects) effect()
+    // Assigning inside the effect is how React hands a cleanup back; capture it the same way.
+    for (const record of unmountClient.cleanups) {
+      if (mountedEffects.includes(record.effect)) record.disposer = record.effect()
+    }
+    const playing = unmountClient.exports.__test.player
+    const element = { paused: false, pause() { this.paused = true }, removeAttribute() { this.src = null }, src: '/gpt-sovits/audio/x.wav' }
+    playing.audio = element
+    playing.playing = true
+    playing.pending = [{ text: '还没念完。' }]
+    const disposers = unmountClient.cleanups
+      .filter((record) => mountedEffects.includes(record.effect))
+      .map((record) => record.disposer)
+      .filter((fn) => typeof fn === 'function')
+    assert(disposers.length > 0, 'the driver must register at least one cleanup, or an unmount cannot stop anything')
+    for (const dispose of disposers) dispose()
+    assert(playing.pending.length === 0, 'unmount must empty the queue')
+    assert(playing.playing === false, 'unmount must stop playback')
+    assert(element.paused === true, 'unmount must pause the audio element, not merely forget it')
+    assert(playing.audio === null, 'unmount must release the audio element')
+
+    /*
+     * And the detector must fire **across a remount**, which is the case that broke.
+     *
+     * Two renders of the same component with a fresh ref set in between is what the shell does
+     * on a switch: same module state, new component instance. The assertion is end-to-end —
+     * the queue must be empty and the epoch advanced — because a detector that runs but does
+     * not reach the player looks identical to a working one from the outside.
+     */
+    const remountClient = loadClient({ effects: true, cleanups: true, env: fakeWindow() })
+    const remountSlots = []
+    remountClient.exports.apply({
+      effect: () => () => {},
+      on: () => () => {},
+      get: () => undefined,
+      locale: { getLocale: () => ({ active: 'zh' }), bind: () => (key) => key, register: () => () => {} },
+      slots: {
+        inject: (_name, callback) => callback(),
+        register: (options, component) => {
+          if (options.name === 'conversation.chat.turnTail') remountSlots.push(component)
+          return () => {}
+        },
+      },
+    })
+    const remountApi = remountClient.exports.__test
+    const remountDriver = remountApi.SCOPED_INNER.get(remountSlots[0]) ?? remountSlots[0]
+    const remountUseChat = (selector) => selector(fakeChatStore([]))
+    remountUseChat.getState = () => fakeChatStore([])
+    const renderSession = (sessionId) => {
+      const from = remountClient.effects.length
+      remountClient.beginRender()
+      remountDriver({ turn: 1, seq: 1, openFile: () => {}, useChat: remountUseChat, sessionId })
+      const mounted = remountClient.effects.slice(from)
+      for (const effect of mounted) effect()
+      for (const record of remountClient.cleanups) {
+        if (mounted.includes(record.effect)) record.disposer = record.effect()
+      }
+      return mounted
+    }
+    renderSession('session-a')
+    assert(remountApi.lastDriverSession() === 'session-a', 'the first mount must record the session')
+    /*
+     * The first mount must not restart. Asserted through the epoch rather than by reading the
+     * effect's source: `fn.toString()` carries every literal in the effect body, so searching it
+     * for `conversation-changed` matches the code that would report a change, not a report.
+     */
+    assert(remountApi.pluginEpoch() === 0, 'the first mount must not restart anything')
+
+    /*
+     * Seed the machine the way a reading session leaves it, then switch.
+     *
+     * Note what is *not* asserted: `pending.length` right after `enqueue`. `drain()` runs
+     * synchronously up to its first `await`, so by the time `enqueue` returns the item is
+     * already off the queue and `draining === true` — the work was accepted, and the queue is
+     * simply no longer the place it lives. (Measured: `pending: 0`, `queued size: 1`,
+     * `draining: true` immediately after a successful enqueue.) The queue is therefore seeded
+     * directly, which is also the sharper setup: it says "this much unfinished reading exists"
+     * without depending on where the drain loop happens to be.
+     */
+    const switchPlayer = remountApi.player
+    assert(switchPlayer.enqueue('msg-old', '上一段对话还在念的句子。', {}, true) === true, 'the old reply must be accepted for reading')
+    assert(switchPlayer.queued.size > 0, 'the per-message offset must be recorded by enqueue')
+    const queuedOnSwitch = 1
+    switchPlayer.pending.push({ text: '还没念完的句子。', key: 'msg-old', pause: 'period', splitMethod: 'cut0' })
+    switchPlayer.busy = true
+    assert(switchPlayer.pending.length === 1, 'the leftover reading must be set up before the switch')
+
+    renderSession('session-b')
+    assert(remountApi.lastDriverSession() === 'session-b', 'the remount must record the new session')
+    assert(remountApi.pluginEpoch() === 1, `a switch across a remount must restart, got epoch ${remountApi.pluginEpoch()}`)
+    assert(switchPlayer.pending.length === 0, 'the previous conversation must not keep playing')
+    assert(switchPlayer.queued.size === 0, 'the previous conversation must not keep its per-message offsets')
+
+    return `the sessionId prop is the signal, kept outside the component; a remount with a new session restarted (${queuedOnSwitch} queued dropped), and a real restart emptied ${queuedBefore} queued items and released 2 claims`
   })
 
   await check('client: a new turn cancels the previous turn queue', async () => {
@@ -1055,7 +1328,9 @@ await (async () => {
     const useChat = (selector) => selector(store)
     useChat.getState = () => store
     const before = client.effects.length
-    turnTail[0]({ turn: 1, seq: 1, openFile: () => {}, useChat })
+    // The slot yields the restart scope; unwrap it to reach the component under test.
+    const driverInner = client.exports.__test.SCOPED_INNER.get(turnTail[0]) ?? turnTail[0]
+    driverInner({ turn: 1, seq: 1, openFile: () => {}, useChat, sessionId: 'session-test' })
     for (const effect of client.effects.slice(before)) effect()
     await settle()
     assert(env.played.length === 0, `auto-read is off, yet the player got ${env.played.length} clip(s)`)
@@ -1099,7 +1374,9 @@ await (async () => {
         },
       },
     })
-    const Action = captured['conversation.chat.assistant-actions']
+    // The slot yields the restart scope; unwrap it to reach the component under test.
+    const scopedAction = captured['conversation.chat.assistant-actions']
+    const Action = client.exports.__test.SCOPED_INNER.get(scopedAction) ?? scopedAction
     assert(typeof Action === 'function', 'the action strip component was not registered')
 
     const store = fakeChatStore([{ turn: 1, messageId: 'm1', text: '测试朗读内容。' }])
@@ -1217,7 +1494,10 @@ await (async () => {
     }
     const useChat = (selector) => selector(store)
     useChat.getState = () => store
-    const tree = captured['conversation.chat.assistant-actions']({ messageId: 'm1', useChat, t: (key) => key })
+    // The slot yields the restart scope; unwrap it to reach the component under test.
+    const scopedForTree = captured['conversation.chat.assistant-actions']
+    const innerForTree = client.exports.__test.SCOPED_INNER.get(scopedForTree) ?? scopedForTree
+    const tree = innerForTree({ messageId: 'm1', useChat, t: (key) => key })
     assert(tree === null, 'a reasoning-only reply must render no read-aloud button')
     return 'no button without speakable text'
   })

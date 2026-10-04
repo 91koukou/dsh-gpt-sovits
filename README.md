@@ -67,7 +67,7 @@ runtime\python.exe api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infe
 - **单位不会念错**：`120km/h` → 「120千米每小时」、`100MB/s` → 「100兆字节每秒」、`3000r/min` → 「3000转每分钟」、`5m/s²` → 「5米每秒平方」；裸缩写也展开 —— `2.4GHz` → 「2点4吉赫兹」、`144Hz` → 「144赫兹」、`20ms` → 「20毫秒」、`16GB` → 「16吉字节」。**词表方式**，新增单位只需加一行；斜杠在单位里是「每」不是「或」，见 [符号怎么念成话](#符号怎么念成话)。详见 [符号怎么念成话](#符号怎么念成话)。
 - **句子之间的停顿由标点决定**：引擎不再自己加静音（`fragment_interval: 0`），插件裁掉每段音频尾部的静音，再按该句的标点插入对应停顿 —— 句号 340ms、逗号 150ms、省略号 460ms、**段落 520ms**。详见 [分句与停顿](#12-分句与停顿pause_ms--segmentsentence--splitintosentences)。
 - **中文分句完整**：`。！？；…` 及其连写（`……`、`！？`）都是句末，句末引号归前句（`他说：“走吧。”` 是一句）；**段落是硬边界**，不会被合并成一段。
-- **切换工作区/会话即取消朗读**：不再出现"切走以后旧对话还在念、越切排队越多"。turn 计数器看不到这种情况（另一个对话不是本对话的下一轮），所以单独跟踪会话标识，并为没有该字段的构建准备了 transcript 结构兜底。
+- **切换工作区/会话即取消朗读**：不再出现"切走以后旧对话还在念、越切排队越多"。信号是外壳发给每个槽位的 `sessionId`，**上一句的值存在模块级变量里**——因为切换会话会把整棵子树卸载重挂，存在组件里的值（`useRef`/`useState`）在重挂后一律是空的，那样永远发现不了切换。详见 [切换会话时取消](#15-切换会话时取消sessionid-跨重挂存活)。
 - **音频只在内存**：不再为每句话写一个 WAV 到硬盘，直接从内存提供服务，条数（240）与总字节（64 MiB）双重上限。升级时自动回收旧版留下的音频文件。
 - **逐句语速与情感**：语速、`temperature`（表现力）、`top-k`、`top-p` 随**每一句**发出，**改动从下一句生效**，已经念过的不重做；音量是播放属性，改了立刻生效也不重新合成。**生成质量参数（采样步数、超采样）刻意不开放逐句调整**。
 - **文本清洗**：代码块整块略过、URL/路径/哈希/长标识符替换成"链接/路径/编号/长代码"，Markdown 标记与 HTML 标签剥掉 —— 只读该读的。
@@ -110,6 +110,7 @@ dsh plugin --profile desktop remove dsh-gpt-sovits
 | [`v0.1.0`](https://github.com/91koukou/dsh-gpt-sovits/releases/tag/v0.1.0) | 首个发布版：逐条朗读按钮、自动朗读开关、音色预设、设置面板 |
 | `v0.2.0` | 引擎生命周期跟随 DSH、文本规范化、流式/总结分流、队列式朗读、启动问候、引擎控制台 |
 | `v0.3.0` | 分句补全中文标点与段落边界、按标点插入停顿并裁掉引擎尾部静音、切换工作区取消朗读、音频改内存、逐句语速与情感 |
+| `v0.3.1` | **切换会话真正停播**：判据改为跨卸载重挂存活的模块级变量（v0.3.0 那版存在组件 `useRef` 里，而会话槽位按代际 key 重挂，于是永不触发）；驱动卸载时额外释放音频元素 |
 
 版本变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
 
@@ -1013,22 +1014,61 @@ const AUDIO_CACHE_BYTES = 64 * 1024 * 1024
 
 **刻意排除**：`sample_steps`、`super_sampling`。它们描述引擎**花多少算力**，不是声音像不像；逐句不同会让同一段回答中途变清晰度。自检里有断言禁止它们进入 `express`。
 
-### 15. 切换会话时取消（`selectSessionKey` + DOM 兜底）
+### 15. 切换会话时取消（`sessionId` 跨重挂存活）
 
 ```
-会话标识变化（store）→ CLAIMED.clear() → player.stop()
-   ↑ 若构建没有该字段
-transcript 结构变化（MutationObserver）→ 同上
+sessionId 变化 → CLAIMED.clear() → player.restart() → PLUGIN_EPOCH += 1 → 界面重挂
+驱动卸载       → player.stop() + 释放 <audio>
 ```
 
-| 信号 | 实现 |
-|---|---|
-| 主 | `selectSessionKey()` 依次探测 `sessionId` / `activeSessionId` / `conversationId` / `threadId` / `workspaceId` 等，还查一层嵌套容器；**取到原始值**才返回 |
-| 兜底 | `findTranscriptRoot()` 从**我们自己的按钮**向上找滚动容器（不猜外壳类名），`conversationFingerprint()` 比对首子节点 |
-| 优先级 | store 有信号时**兜底主动停用** —— 不让两个信号打架 |
-| 首次不算变化 | `sessionKey === null` 一律视作"本构建没有此信号"，**绝不当作变化**，否则每次渲染都会取消朗读 |
+**信号是外壳给的，不用猜**：`conversation.chat.turnTail` 的 `standardProps` 里就有 `sessionId: SessionId`，而且该槽位 `scope: "session"`。
 
-锚点属性：`data-gpt-sovits-read-aloud`（朗读按钮）与 `data-gpt-sovits-auto-read`（开关）。
+#### 关键：上一句的值**不能存在组件里**
+
+这是本项目唯一一个"写对了却完全不工作"的 bug，值得单独记一笔。
+
+会话作用域的槽位是**按会话代际做 React key** 渲染的 —— `@deepseek-ai/dsh-client-ui-renderer` 里是 `sessionGenerationKeyOf(binding)`，对每个会话的 binding 返回一个新序号。所以**切换会话会把整棵子树卸载、再挂一份新的**。
+
+于是第一版实现（把上一个 sessionId 存在驱动组件的 `useRef` 里，再在 effect 里比对新旧）必然失效：
+
+```
+切换会话 → 旧组件卸载、新组件挂载 → useRef 又是 null
+        → effect 判为"首次挂载，只记录不动作" → 永远发现不了变化
+```
+
+日志是铁证：那段时间 **50 次 `driver-mounted`，`conversation-changed` 一次都没有**，而 `player` 是模块级的，不随组件销毁 —— 上一段对话就这么被一个"已经不存在"的组件继续念下去。
+
+**所以上一个值存在模块级的 `LAST_DRIVER_SESSION`**（卸载重挂后仍然活着），并在 effect 里比它：
+
+```js
+if (prev !== null && prev !== session) { LAST_DRIVER_SESSION = session; RESTART_PLUGIN("session-id-prop") }
+```
+
+**先认领再重启**：`turnTail` 是 list 槽位，一次切换会让 N 份副本同时检测到，先写回全局就不必靠 400ms 去重窗口来收尾。
+
+#### 两道保险，各自独立生效
+
+| 保险 | 触发时机 | 作用 |
+|---|---|---|
+| **检测 `sessionId` 变化** | 切换会话 | 完整重启：清队列、清每条消息的已入队偏移、清量得的音频长度、清 CLAIMED、清 localStorage 的"已读"标记、`PLUGIN_EPOCH += 1` 让界面重挂 |
+| **驱动卸载时收尾** | 子树被拆掉 | `player.stop()` **并且** `pause()` + 去掉 `src` + 丢掉元素引用 |
+
+第二道保险是必需的，不是重复：`player` 在模块层，组件没了它照样在放。而且**只调 `stop()` 不够** —— 一个被暂停但仍被引用的元素会继续占着音频输出，所以卸载时要把元素也释放掉（`playing.audio === null`）。
+
+模块级状态刻意**不动**：`audioCache`（按内容摘要索引，与对话无关）、`trimCache`（重启时清，因为它按会话计长度）、订阅者列表（重挂后的新实例要靠它知道自己什么时候该播放）。
+
+**为什么不是"温和清空队列"**：那会留下"队列空了但当前这句还在念、而它的后续永远不会来"的怪状态。切换会话时新对话的优先级高于旧对话的尾巴。
+
+自检里的两条（`scripts/selfcheck.mjs`）：
+
+```
+✓ client: switching workspace or session cancels the reading
+    — 上一句的值在组件之外；带新会话的重挂触发了重启（丢 1 条待播），真实重启清空 1 条待播并释放 2 条认领
+```
+
+> 第一条断言会**拒绝 `sessionSeen.current` 这种写法回来**（那正是失效的判据）；第二条会渲染一个驱动、取出它注册的清理函数、真跑一遍，并要求音频元素被释放。
+
+锚点属性：`data-gpt-sovits-read-aloud`（朗读按钮）与`data-gpt-sovits-auto-read`（开关）—— 仍用于诊断与样式，**不再用作切换信号**（早先那套 `selectSessionKey` + `MutationObserver` 兜底已全部删除）。
 
 ### 16. 单位词表（UNIT_WORDS / UNIT_PATTERN / ABBREVIATION_PATTERN）
 

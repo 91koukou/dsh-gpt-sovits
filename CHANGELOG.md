@@ -6,6 +6,52 @@ All notable changes to this plugin are recorded here. The format follows
 
 ---
 
+## [0.3.1] — 2026-10-03
+
+### Fixed
+
+- **Switching conversation now actually stops the voice.** Reported as "it still
+  reads the previous conversation after I switch". 0.3.0 looked correct and did
+  nothing, because the previous session id was kept in the driver component's
+  `useRef` — and a session-scoped slot is rendered under a **per-session React
+  key** (`sessionGenerationKeyOf` in `@deepseek-ai/dsh-client-ui-renderer`), so a
+  switch unmounts the subtree and mounts a fresh copy whose refs are all `null`
+  again. Every mount re-entered the "first mount, nothing to report" branch, and
+  the restart never ran. The log settled it: 50 `driver-mounted`, zero
+  `conversation-changed`, while the module-level player kept speaking for a
+  component that no longer existed.
+
+  The previous value now lives at **module scope** (`LAST_DRIVER_SESSION`), the
+  only storage that survives the remount, and the new session is claimed before
+  the restart so N mounted copies do not each report the same switch.
+
+- **An unmounted driver releases its audio.** The player is module-level, so it
+  outlives the component. `driver` unmount now calls `stop()` *and* pauses the
+  element, drops its `src` and clears the reference — a paused element that is
+  still referenced keeps holding the output. This is the second, independent
+  guard: even if the shell ever stops remounting on a switch, the teardown
+  silences playback on its own.
+
+### Changed
+
+- The four dead switch detectors are gone for good (`selectSessionKey` over five
+  guessed store fields, `navigation.current` turn continuity, the node-set
+  digest, the page URL) together with the DOM `MutationObserver` fallback. None
+  of them could see a switch; the slot catalog's `sessionId` standard prop could
+  all along.
+
+- Two offline self-checks were rewritten and two more added, all inside the
+  existing session-switch check, so the total stays at **58**. One rejects a
+  component-local previous-session value from coming back; the other renders a
+  real driver, runs the cleanup it registered, and requires the audio element to
+  be released. Two more drive the fix end to end: a switch **across a remount**
+  (same module state, fresh refs) must empty the queue and advance the epoch, and
+  the first mount must not restart anything. The self-check harness can now
+  reproduce a remount (fresh ref cells) and collect effect cleanups, which is
+  what those need.
+
+---
+
 ## [0.3.0] — 2026-10-03
 
 Six items, all reported from listening to the output. The theme is that the
