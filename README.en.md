@@ -111,7 +111,6 @@ Each release is anchored by a tag, so **an older version is never overwritten by
 | `v0.2.0` | Engine lifecycle follows DSH, symbol normalisation, streaming/summary split, queued reading, startup greeting, engine console |
 | `v0.3.0` | Full Chinese sentence terminators and paragraph boundaries, punctuation-driven pauses with the engine's trailing silence trimmed, a workspace switch cancels the reading, memory-only audio, per-sentence speed and expression |
 | `v0.3.1` | **A conversation switch really does stop the voice**: the signal moved to a module-level value that survives the unmount-and-remount (0.3.0 kept it in the component's `useRef`, and a session slot is re-keyed per session, so it never fired); an unmounting driver also releases its audio element |
-| `v0.3.2` | **Documentation sync**: the English README caught up with the Chinese one (0.3.1 updated only the Chinese text, so the English still described the deleted detector); the 0.3.1 date and the Chinese version row corrected |
 
 Per-version changes are listed in [CHANGELOG.md](./CHANGELOG.md).
 
@@ -614,7 +613,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 | GPT-SoVITS checkout | `GPT-SoVITS-v2pro-20250604-nvidia50` (with every `GPT_weights` … `v4` and `SoVITS_weights` … `v4` directory present) |
 | Model version actually used | **v2Pro** |
 | Engine endpoint | `http://127.0.0.1:9880` |
-| Plugin version | v0.3.2 |
+| Plugin version | v0.3.1 |
 
 **Measured latency** (same machine, `sample_steps 32`, reference transcript filled in):
 

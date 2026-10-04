@@ -6,35 +6,6 @@ All notable changes to this plugin are recorded here. The format follows
 
 ---
 
-## [0.3.2] — 2026-10-04
-
-Documentation only; no behaviour changed and the offline checks still number 58.
-
-0.3.1 was released with the **Chinese** README updated and the English one left behind, so the
-English text still described the detector that had just been deleted — it named `selectSessionKey`
-and a `MutationObserver` fallback, neither of which exists any more. Its changelog entry was also
-dated a day early, and the Chinese README's version row had been left at 0.3.0 while its own version
-table already listed 0.3.1.
-
-### Fixed
-
-- **`README.en.md` brought to parity with `README.md`**: the version row and a `v0.3.1` entry in the
-  version table; the feature line for a conversation switch, which still claimed the identity was
-  "tracked separately, with a transcript-shape fallback"; and section 15 rewritten to match the
-  Chinese text — the signal is the standard `sessionId` prop, the previous value has to live at
-  module scope because a switch unmounts and remounts the session-scoped subtree under a per-session
-  React key, the new session is claimed before the restart so the several copies of a list slot do
-  not each report it, and an unmounting driver releases its audio element because a
-  paused-but-referenced one keeps holding the output.
-
-- **The 0.3.1 date**, now 2026-10-04, the day it was actually released.
-
-- **The Chinese README's version row**, now `v0.3.1`.
-
-Both READMEs carry 18 matching appendix sections again.
-
----
-
 ## [0.3.1] — 2026-10-04
 
 ### Fixed
@@ -78,6 +49,26 @@ Both READMEs carry 18 matching appendix sections again.
   the first mount must not restart anything. The self-check harness can now
   reproduce a remount (fresh ref cells) and collect effect cleanups, which is
   what those need.
+
+### Documentation
+
+The release first went out with only the Chinese README updated, so the English one still described
+the detector this version deletes — it named `selectSessionKey` and a `MutationObserver` fallback,
+neither of which exists any more. The two are level again, and the other two slips are corrected:
+
+- **`README.en.md` brought to parity with `README.md`**: the version row and a `v0.3.1` entry in the
+  version table; the feature line for a conversation switch, which still claimed the identity was
+  "tracked separately, with a transcript-shape fallback"; and section 15 rewritten to match the
+  Chinese text — the signal is the standard `sessionId` prop, the previous value has to live at
+  module scope because a switch unmounts and remounts the session-scoped subtree under a per-session
+  React key, the new session is claimed before the restart so the several copies of a list slot do
+  not each report it, and an unmounting driver releases its audio element because a
+  paused-but-referenced one keeps holding the output.
+- **This entry's date**, 2026-10-04, the day it was actually released.
+- **The Chinese README's version row**, which had been left at v0.3.0 while its own version table
+  already listed v0.3.1.
+
+Both READMEs carry 18 matching appendix sections again. No code changed for any of it.
 
 ---
 
