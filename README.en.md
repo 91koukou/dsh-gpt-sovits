@@ -67,7 +67,7 @@ The npm names `dsh-gpt-sovits` and `dsh-sovits` both returned 404 — the "upstr
 - **Units are read correctly**: `120km/h` → `120千米每小时`, `100MB/s` → `100兆字节每秒`, `3000r/min` → `3000转每分钟`, `5m/s²` → `5米每秒平方`; bare abbreviations are expanded too — `2.4GHz` → `2.4吉赫兹`, `144Hz` → `144赫兹`, `20ms` → `20毫秒`, `16GB` → `16吉字节`. A **table**, so adding a unit is one line; a slash inside a unit means "per", not "or".
 - **The pause between sentences comes from the punctuation**: the engine adds none of its own (`fragment_interval: 0`), the plugin trims each clip's trailing silence, then waits for the mark that ended the sentence — full stop 340 ms, comma 150 ms, ellipsis 460 ms, **paragraph 520 ms**.
 - **Complete Chinese sentence splitting**: `。！？；…` and runs of them (`……`, `！？`) all end a sentence, a closing quote belongs to the sentence it follows (`他说：“走吧。”` is one sentence), and **a paragraph is a hard boundary** that is never merged away.
-- **Switching workspace or session cancels the reading**: no more "the old conversation keeps being read and every switch queues more". The turn counter cannot see this — another conversation is not a turn of this one — so the conversation identity is tracked separately, with a transcript-shape fallback for a build that exposes no such field.
+- **Switching workspace or session cancels the reading**: no more "the old conversation keeps being read and every switch queues more". The signal is the `sessionId` the shell hands every slot, and **the previous value is kept at module scope** — a switch unmounts and remounts the whole session subtree, so a value kept inside the component (a `useRef`) would be `null` again on every mount and the change could never be seen. An unmounting driver also releases its audio element.
 - **Audio lives in memory**: no WAV per sentence is written to the drive any more; clips are served straight from memory under a dual ceiling of 240 entries and 64 MiB. Old files left by a previous version are reclaimed on upgrade.
 - **Per-sentence speed and expression**: speed, `temperature`, `top-k` and `top-p` are sent with **every sentence** and a change applies **from the next sentence**, so nothing already spoken is redone. Volume is a playback property, so changing it is instant and costs no synthesis. **Generation quality (sampling steps, super sampling) is deliberately not adjustable per sentence.**
 - **Text hygiene**: code fences are skipped whole, URLs/paths/hashes/long identifiers collapse to "link/path/id/code", Markdown markers and HTML tags are stripped — only what should be spoken is spoken.
@@ -110,6 +110,7 @@ Each release is anchored by a tag, so **an older version is never overwritten by
 | [`v0.1.0`](https://github.com/91koukou/dsh-gpt-sovits/releases/tag/v0.1.0) | First release: per-reply read-aloud button, auto-read toggle, voice presets, settings page |
 | `v0.2.0` | Engine lifecycle follows DSH, symbol normalisation, streaming/summary split, queued reading, startup greeting, engine console |
 | `v0.3.0` | Full Chinese sentence terminators and paragraph boundaries, punctuation-driven pauses with the engine's trailing silence trimmed, a workspace switch cancels the reading, memory-only audio, per-sentence speed and expression |
+| `v0.3.1` | **A conversation switch really does stop the voice**: the signal moved to a module-level value that survives the unmount-and-remount (0.3.0 kept it in the component's `useRef`, and a session slot is re-keyed per session, so it never fired); an unmounting driver also releases its audio element |
 
 Per-version changes are listed in [CHANGELOG.md](./CHANGELOG.md).
 
@@ -612,7 +613,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 | GPT-SoVITS checkout | `GPT-SoVITS-v2pro-20250604-nvidia50` (with every `GPT_weights` … `v4` and `SoVITS_weights` … `v4` directory present) |
 | Model version actually used | **v2Pro** |
 | Engine endpoint | `http://127.0.0.1:9880` |
-| Plugin version | v0.3.0 |
+| Plugin version | v0.3.1 |
 
 **Measured latency** (same machine, `sample_steps 32`, reference transcript filled in):
 
@@ -968,23 +969,84 @@ existed, so a request that omits `express` is unchanged.
 the engine does, not how the voice sounds, and letting them differ per sentence would change
 fidelity halfway through an answer. An assertion forbids them from entering `express`.
 
-### 15. Cancelling on a conversation switch (`selectSessionKey` + a DOM fallback)
+### 15. Cancelling on a conversation switch (`sessionId`, surviving the remount)
 
 ```
-session identity changes (store)  -> CLAIMED.clear() -> player.stop()
-   ^ when the build has no such field
-transcript shape changes (MutationObserver) -> the same
+sessionId changes -> CLAIMED.clear() -> player.restart() -> PLUGIN_EPOCH += 1 -> UI remounts
+driver unmounts   -> player.stop() + release the <audio> element
 ```
 
-| Signal | Implementation |
-|---|---|
-| Primary | `selectSessionKey()` probes `sessionId` / `activeSessionId` / `conversationId` / `threadId` / `workspaceId` and one level of nesting; it returns only a primitive |
-| Fallback | `findTranscriptRoot()` walks up from **our own button** to the scrolling container (assuming no shell class names), and `conversationFingerprint()` compares its first child |
-| Precedence | When the store provides a key the fallback **stands down**, so two signals cannot fight |
-| First sight is not a change | `sessionKey === null` always means "this build has no such signal" and is **never** treated as a change — otherwise every render would cancel the reading |
+**The signal is one the shell hands over, not one to guess**: `conversation.chat.turnTail` lists
+`sessionId: SessionId` among its `standardProps`, and that slot is `scope: "session"`.
 
-Anchor attributes: `data-gpt-sovits-read-aloud` (the button) and `data-gpt-sovits-auto-read`
-(the toggle).
+#### The key point: the previous value must not live in the component
+
+This is the project's one bug that was **written correctly and did nothing at all**, and it is
+worth a section of its own.
+
+A session-scoped slot is rendered under a **per-session React key** — `sessionGenerationKeyOf(binding)`
+in `@deepseek-ai/dsh-client-ui-renderer` returns a fresh generation number per session binding. So
+switching conversation **unmounts the whole subtree and mounts a new copy**.
+
+Which makes the first implementation — keeping the previous session id in the driver component's
+`useRef` and comparing old against new in an effect — guaranteed to fail:
+
+```
+switch -> old component unmounts, new one mounts -> useRef is null again
+       -> the effect reads "first mount, nothing to report" -> the change is never seen
+```
+
+The log settled it: **50 `driver-mounted` and not one `conversation-changed`**, while `player` is
+module-level and untouched by any teardown — so the previous conversation went on being read by a
+component that no longer existed.
+
+**So the previous value lives at module scope**, in `LAST_DRIVER_SESSION`, which survives the
+unmount and remount, and the effect compares against it:
+
+```js
+if (prev !== null && prev !== session) { LAST_DRIVER_SESSION = session; RESTART_PLUGIN("session-id-prop") }
+```
+
+**Claim before restarting**: `turnTail` is a list slot, so one switch has N copies noticing at once;
+writing the new value back to the global first means the 400 ms collapse window is not what has to
+sort it out.
+
+#### Two guards, each working on its own
+
+| Guard | When it fires | What it does |
+|---|---|---|
+| **Watching `sessionId`** | a conversation switch | a full restart: clears the queue, every per-message queued offset, the measured clip lengths, `CLAIMED`, and the persisted "already read" mark, then `PLUGIN_EPOCH += 1` so the UI remounts |
+| **A driver unmounting** | the subtree is torn down | `player.stop()` **and** `pause()` + drop `src` + clear the element reference |
+
+The second guard is necessary rather than a duplicate: `player` is module-level, so it keeps playing
+after its component is gone. And **`stop()` alone is not enough** — a paused element that is still
+referenced goes on holding the audio output, so the unmount has to release the element too
+(`playing.audio === null`).
+
+Module state is deliberately **left alone**: `audioCache` (keyed by content digest, nothing to do
+with a conversation), `trimCache` (cleared by the restart, because a clip's length belongs to the
+session it was spoken in) and the subscriber list (the fresh instances after a remount learn when to
+play from it).
+
+**Why not "gently clear the queue"**: that leaves the awkward state where the queue is empty but the
+current sentence is still being spoken and its continuation is never coming. On a switch, the new
+conversation outranks the tail of the old one.
+
+The two offline checks (`scripts/selfcheck.mjs`):
+
+```
+✓ client: switching workspace or session cancels the reading
+    — the previous value lives outside the component; a remount carrying a new session restarts
+      (1 queued item dropped), and a real restart empties 1 queued item and releases 2 claims
+```
+
+> The first assertion **rejects a return of `sessionSeen.current`**, which is exactly the shape that
+> failed; the second renders a real driver, takes the cleanup it registered, runs it, and requires
+> the audio element to be released.
+
+Anchor attributes: `data-gpt-sovits-read-aloud` (the button) and `data-gpt-sovits-auto-read` (the
+toggle) — still used for diagnostics and styling, **no longer as a switch signal** (the earlier
+`selectSessionKey` + `MutationObserver` fallback is gone entirely).
 
 ### 16. The unit table (UNIT_WORDS / UNIT_PATTERN / ABBREVIATION_PATTERN)
 

@@ -674,7 +674,7 @@ await withEngine(() => speak({ ... }))   // ❌ 外层占着队列，内层等�
 | GPT-SoVITS 检出 | `GPT-SoVITS-v2pro-20250604-nvidia50`（含 `GPT_weights` … `v4`、`SoVITS_weights` … `v4` 全部权重目录） |
 | 实测使用的模型版本 | **v2Pro** |
 | 引擎监听 | `http://127.0.0.1:9880` |
-| 插件版本 | v0.3.0 |
+| 插件版本 | v0.3.1 |
 
 **实测性能**（同一台机器，`sample_steps 32`、参考文本已填）：
 

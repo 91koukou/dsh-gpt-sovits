@@ -6,7 +6,7 @@ All notable changes to this plugin are recorded here. The format follows
 
 ---
 
-## [0.3.1] — 2026-10-03
+## [0.3.1] — 2026-10-04
 
 ### Fixed
 
