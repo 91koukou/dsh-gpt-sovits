@@ -1,0 +1,6 @@
+url: https://github.com/91koukou/dsh-gpt-sovits
+name: 91koukou/dsh-gpt-sovits
+category: voice
+description:
+  en: "Text-to-speech for the DeepSeek Harness web GUI using a GPT-SoVITS engine you run yourself: a read-aloud button on each reply placed after the branch action, an auto-read toggle, voice presets (name, reference audio, reference transcript, language), and a settings page that also embeds the engine console. Streaming steps are synthesized one sentence per request so audio starts early while a settled summary is packed into blocks and split by the engine; sentences queue so a new one never interrupts the one being spoken, a new turn cancels the previous turn's queue, and a conversation switch restarts the reading. It normalizes symbols, units and paths into speakable Chinese, inserts punctuation-driven pauses after trimming the engine's trailing silence, keeps clips in memory instead of writing WAV files, and sends speed, temperature, top-k and top-p per sentence. No model weights or reference audio are bundled."
+  zh: "用你自己运行的 GPT-SoVITS 引擎为 DeepSeek Harness Web GUI 提供语音合成：每条回复带一个朗读按钮（插在「新对话分支」之后），一个自动朗读开关，音色预设（名称、参考音频、参考文本、语言），以及内嵌引擎控制台的设置页。流式步骤一句一请求以尽早起播，定稿总结打包成块交给引擎切分；句子排队朗读，绝不打断正在念的那句，新一轮开始时取消上一轮队列，切换会话则重启朗读。把符号、单位与路径规范化成可朗读的中文，裁掉引擎尾部静音后按标点插入停顿，音频只留在内存而不写 WAV 文件，语速、temperature、top-k、top-p 逐句发送。不附带任何模型权重或参考音频。"
