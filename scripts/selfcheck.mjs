@@ -1954,6 +1954,172 @@ check('host: audio is served from memory, with the on-disk clips reclaimed', () 
   return 'memory-only clips, byte-capped, expression per sentence, quality fixed'
 })
 
+check('host: diagnostics are bounded, in memory and on disk', () => {
+  /*
+   * Measured on a live install: one browser session sent 3,682 reports, and
+   *
+   * | Symptom | Cause |
+   * |---|---|
+   * | the page's memory grew ~1 MB per session | every report was pushed into a module-level array nothing ever read |
+   * | 362 distinct entries in the dedup set | \`see-<messageId>\` and \`gate-<messageId>\` are a new name per reply, so \`once\` never matched |
+   * | \`diag.log\` passed 400 KB and kept going | the append had no size check and no rotation |
+   * | \`trimCache\` only ever grew | keyed by clip URL, and only a restart cleared it |
+   *
+   * Each bound is asserted here, because a diagnostic that grows without limit is the one kind of
+   * leak that hides behind the feature it is meant to be observing.
+   */
+  assert(!/DIAG_EVENTS/.test(clientSource), 'nothing may accumulate the reports themselves')
+  assert(/const diagFamily = /.test(clientSource), 'id-bearing names must be reduced to a family')
+  assert(/const dynamic = family !== String\(event\)/.test(clientSource), 'the reduction must be detected')
+  assert(/const once = dynamic \|\|/.test(clientSource), 'an id-bearing name must always be deduplicated')
+  assert(/DIAG_SEEN\.add\(family\)/.test(clientSource), 'the set must hold families, not raw names')
+  assert(/TRIM_CACHE_LIMIT/.test(clientSource), 'the measured clip lengths need a ceiling')
+  const trimCap = /while \(this\.trimCache\.size > TRIM_CACHE_LIMIT\)/.test(clientSource)
+  assert(trimCap, 'the ceiling must actually evict')
+  assert(/DIAG_MAX_BYTES/.test(hostSource), 'the log needs a size cap')
+  assert(/rotateIfLarge\(diagPath, DIAG_MAX_BYTES\)/.test(hostSource), 'the cap must be applied before each append')
+  assert(/renameSync\(file, previous\)/.test(hostSource), 'rotation must keep the previous file')
+
+  // And the reduction must behave: a family collapses, a plain name does not.
+  const api = loadClient({ effects: false, env: fakeWindow() }).exports.__test
+  assert(typeof api.diagSeenSize === 'function', 'the dedup set must be observable for a check')
+  const before = api.diagSeenSize()
+  api.diag('see-message-one', { n: 1 })
+  api.diag('see-message-two', { n: 2 })
+  api.diag('gate-message-one', { n: 3 })
+  const after = api.diagSeenSize()
+  assert(after - before === 2, `two families are expected, not one per id: grew by ${after - before}`)
+  return 'no accumulation, families deduplicated, log capped, clip lengths capped'
+})
+
+check('client: a cancelled clip is not a failure, and a lost clip is re-synthesized', () => {
+  /*
+   * Two ways a clip stops without being a real failure, both measured on a live log:
+   *
+   * | Report | Cause |
+   * |---|---|
+   * | 53 \`audio playback failed\` | 36 of them followed a \`turn-reset\` within two seconds — one driver copy calling \`stop()\`, which aborts the element on purpose and fires \`error\` |
+   * | a stale URL that never recovered | clips are memory-only now, so eviction or a host restart kills the URL; the route answers \`clip-missing\` and its own comment promised a re-request that was never written |
+   *
+   * So the checks are: a generation bump resolves instead of rejecting, the failure carries the
+   * host's own name so the caller can act on it, and the caller does act on it exactly once.
+   */
+  assert(/if \(generation !== this\.generation\) \{\s*\n\s*\n?\s*done\(\);\s*\n\s*return;\s*\n\s*\}/.test(clientSource) ||
+    /audio\.onerror[\s\S]{0,400}if \(generation !== this\.generation\) \{[\s\S]{0,80}done\(\)/.test(clientSource),
+    'a cancelled clip must resolve, not reject')
+  assert(/async clipErrorName\(url\)/.test(clientSource), 'a load failure must be named from the host, not guessed')
+  assert(/method: "HEAD"/.test(clientSource), 'the name comes from probing the route')
+  assert(/payload\.error/.test(clientSource), 'the host names it in the body')
+  assert(/error\.message === "clip-missing"/.test(clientSource), 'only a lost clip is worth retrying')
+  assert(/clip-missing-retry/.test(clientSource), 'the retry must be visible in the log')
+  // Exactly one retry: a second requestClip inside the catch, and no loop around it.
+  const retryBlock = clientSource.slice(clientSource.indexOf('const missing = error instanceof Error'))
+  const retryEnd = retryBlock.indexOf('if (generation !== this.generation) return;')
+  assert(retryBlock.slice(0, retryEnd > 0 ? retryEnd : 600).split('requestClip').length === 2,
+    'the retry must re-request once and then give up')
+
+  // And the host side must keep answering the name the client now looks for.
+  assert(/clip-missing/.test(hostSource), 'the route must keep naming a lost clip')
+
+  return 'cancellation resolves quietly, a lost clip is named and re-requested once'
+})
+
+await check('client: one turn is claimed once, and a remount does not replay it', async () => {
+  /*
+   * Measured: a single turn advancing produced **seven** `turn-reset` lines inside four
+   * milliseconds, because every mounted driver copy sees the turn number jump relative to its own
+   * last render. One log held 1,005 of them across eight turns.
+   *
+   * The duplication was not harmless. Each copy called `stop()`, so a copy that had just started a
+   * clip had it aborted by a sibling — which is where most of the `audio playback failed` reports
+   * came from. The claim therefore has to be shared, at module scope, because a remount resets a
+   * `useRef` (the same trap the session detector fell into).
+   *
+   * What is driven here is the claim itself, through real mounts of the real component. The *advance*
+   * is deliberately not simulated: an effect closes over the render that registered it, so replaying
+   * collected effect bodies after mutating the store would re-run them with a stale turn count and
+   * assert nothing about a real advance. React re-rendering on a store change is what carries the new
+   * count into the effect, and that is the shell's job rather than this harness's. The guard the
+   * advance depends on is therefore asserted where it lives, at the end of this check.
+   */
+  const claimClient = loadClient({ effects: true, cleanups: true, env: fakeWindow() })
+  const claimSlots = []
+  claimClient.exports.apply({
+    effect: () => () => {},
+    on: () => () => {},
+    get: () => undefined,
+    locale: { getLocale: () => ({ active: 'zh' }), bind: () => (key) => key, register: () => () => {} },
+    slots: {
+      inject: (_name, callback) => callback(),
+      register: (options, component) => {
+        if (options.name === 'conversation.chat.turnTail') claimSlots.push(component)
+        return () => {}
+      },
+    },
+  })
+  const claimApi = claimClient.exports.__test
+  const claimDriver = claimApi.SCOPED_INNER.get(claimSlots[0]) ?? claimSlots[0]
+
+  const claimTurns = [{ turn: 1, messageId: 'msg-1', text: '第一轮。' }]
+  const claimUseChat = (selector) => selector(fakeChatStore(claimTurns))
+  claimUseChat.getState = () => fakeChatStore(claimTurns)
+
+  /** Mount one copy: fresh ref cells, then run the effects it registered. */
+  const mountClaim = () => {
+    const from = claimClient.effects.length
+    claimClient.beginRender()
+    claimDriver({ turn: 1, seq: 1, openFile: () => {}, useChat: claimUseChat, sessionId: 'session-claim' })
+    const mounted = claimClient.effects.slice(from)
+    for (const effect of mounted) effect()
+    for (const record of claimClient.cleanups) {
+      if (mounted.includes(record.effect)) record.disposer = record.effect()
+    }
+    return mounted
+  }
+
+  /*
+   * Start from a known claim. Module state is shared across the checks in this file and an earlier
+   * one already drove this effect, so a test that assumed the claim starts empty would really be
+   * asserting the order the checks happen to run in.
+   */
+  claimApi.restart('selfcheck-turn-claim-setup')
+  assert(claimApi.lastResetTurn() === null, 'a restart must clear the claim')
+
+  // Three copies of one turn: the claim settles on that turn, not on a count of the copies.
+  mountClaim()
+  mountClaim()
+  const third = mountClaim()
+  assert(third.length > 0, 'the third copy must have registered its effects')
+  const claimedAt = claimApi.lastResetTurn()
+  assert(claimedAt === 1, `three copies on one turn must settle on that turn, got ${claimedAt}`)
+
+  /*
+   * A fresh copy must adopt an existing claim rather than reset the turn it arrives with. This is the
+   * remount case — the one a `useRef` cannot survive — and it is reachable here because every mount
+   * walks the fresh-mount branch.
+   */
+  mountClaim()
+  assert(claimApi.lastResetTurn() === claimedAt,
+    `a re-mounted copy must settle on the same turn, got ${claimApi.lastResetTurn()} against ${claimedAt}`)
+
+  /*
+   * The guard the advance depends on, asserted where it lives. A copy must skip a turn whose claim is
+   * already at or past it, which is what collapses seven siblings into one reset.
+   */
+  assert(/if \(LAST_RESET_TURN !== null && turnCount <= LAST_RESET_TURN\) return;/.test(clientSource),
+    'a turn already claimed by a sibling must be skipped')
+  assert(/LAST_RESET_TURN = turnCount;\n\s*const dropped = player\.pending\.length;/.test(clientSource),
+    'the claim must be taken before the work, so a losing copy never reaches the player')
+  assert(/if \(LAST_RESET_TURN === null\) LAST_RESET_TURN = turnCount;/.test(clientSource),
+    'a fresh mount must adopt an existing claim rather than re-reset the turn it arrives with')
+  assert(!/const turnResetSeen = react\.useRef/.test(clientSource),
+    'a component-local claim cannot work here: a remount resets a ref')
+  const restartBody = clientSource.slice(clientSource.indexOf('const RESTART_PLUGIN = (reason)'))
+  assert(/LAST_RESET_TURN = null/.test(restartBody.slice(0, 2500)),
+    'a conversation switch must drop the claim, since turn numbers are global across the workspace')
+
+  return `the claim is module-level and settles on one turn across copies (${claimedAt}), a remount does not replay it, and a restart drops it`
+})
 check('host: the engine console is decoded as UTF-8, with a code-page fallback', () => {
   /*
    * Measured mojibake, reported by the user: Python on Windows encodes stdout/stderr with

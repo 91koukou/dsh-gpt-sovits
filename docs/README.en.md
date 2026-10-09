@@ -1,6 +1,8 @@
 # dsh-gpt-sovits
 
-**English** · [中文](./README.md)
+**English** · [中文](./README.zh.md)
+
+> This is the **complete documentation**. For the short version, see [../README.md](../README.md).
 
 > ### 🐋 This whale girl installed a voice for herself
 >
@@ -8,7 +10,7 @@
 >
 > **The code is AI-written. The voice is trained by the author.**
 >
-> **Verification: all green** ✅ — 58 offline checks ✅ / 16 live-engine integration checks ✅ / button and auto-read confirmed by hand ✅
+> **Verification: all green** ✅ — 61 offline checks ✅ / 16 live-engine integration checks ✅ / button and auto-read confirmed by hand ✅
 >
 > Verified on: **Windows 11** · DSH desktop build (client contract `0.2.0-rc.2`) · Node **v24.21.0** · **RTX 5070 Ti (16 GB)** · Python **3.9.13** + torch **2.7.0+cu128** · GPT-SoVITS **v2Pro** @ `127.0.0.1:9880`
 >
@@ -111,8 +113,9 @@ Each release is anchored by a tag, so **an older version is never overwritten by
 | `v0.2.0` | Engine lifecycle follows DSH, symbol normalisation, streaming/summary split, queued reading, startup greeting, engine console |
 | `v0.3.0` | Full Chinese sentence terminators and paragraph boundaries, punctuation-driven pauses with the engine's trailing silence trimmed, a workspace switch cancels the reading, memory-only audio, per-sentence speed and expression |
 | `v0.3.1` | **A conversation switch really does stop the voice**: the signal moved to a module-level value that survives the unmount-and-remount (0.3.0 kept it in the component's `useRef`, and a session slot is re-keyed per session, so it never fired); an unmounting driver also releases its audio element |
+| `v0.3.2` | **Four reliability fixes**: a deliberate cancellation is no longer reported as a playback failure, an evicted clip is re-synthesized, one turn resets the queue once instead of once per driver copy, and the diagnostics have memory and disk ceilings |
 
-Per-version changes are listed in [CHANGELOG.md](./CHANGELOG.md).
+Per-version changes are listed in [CHANGELOG.md](../CHANGELOG.md).
 
 ---
 
@@ -177,7 +180,7 @@ The `/tts` body follows the `api_v2.py` contract: `media_type: "wav"`, `streamin
 
 ```sh
 # Offline: syntax, module-loading contract, slot names, text pipeline, store reads,
-# state directory, encoding (58 checks)
+# state directory, encoding (61 checks)
 node scripts/selfcheck.mjs
 
 # Live: real HTTP carrier plus the real engine, end to end (16 checks)
@@ -597,7 +600,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 
 > **The table below is the environment this code actually ran in with every test passing** — not a "recommended configuration", and not copied from documentation.
 >
-> Every row was measured on the machine; the **58 offline checks** and the **16 live-engine integration checks** both passed there, and the button and auto-read were confirmed by the author clicking them on this same machine.
+> Every row was measured on the machine; the **61 offline checks** and the **16 live-engine integration checks** both passed there, and the button and auto-read were confirmed by the author clicking them on this same machine.
 >
 > A different OS, DSH version or GPU is **plausible but untested** — if you hit trouble, please open an issue with your environment details.
 
@@ -613,7 +616,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 | GPT-SoVITS checkout | `GPT-SoVITS-v2pro-20250604-nvidia50` (with every `GPT_weights` … `v4` and `SoVITS_weights` … `v4` directory present) |
 | Model version actually used | **v2Pro** |
 | Engine endpoint | `http://127.0.0.1:9880` |
-| Plugin version | v0.3.1 |
+| Plugin version | v0.3.2 |
 
 **Measured latency** (same machine, `sample_steps 32`, reference transcript filled in):
 
@@ -633,7 +636,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 This project is MIT-licensed. **One part of it is substantive reuse of someone else's
 implementation**; the rest is interface contracts and layout constants. **The full
 list — exact files, exact statements, and what was changed — is in
-[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).** Summary:
+[THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md).** Summary:
 
 | Source | License | What was reused |
 |---|---|---|
@@ -675,7 +678,7 @@ lib/
 ├─ client.js       Client half: slot components, player and queue, text pipeline, settings UI
 └─ supervisor.py   Supervisor: windowless engine start, readiness wait, lifetime binding, log capture
 scripts/
-├─ selfcheck.mjs   58 offline checks (static assertions plus behavioural tests in a vm sandbox)
+├─ selfcheck.mjs   61 offline checks (static assertions plus behavioural tests in a vm sandbox)
 └─ integration.mjs 16 live checks (a real HTTP carrier plus the real engine)
 ```
 
@@ -1124,7 +1127,7 @@ plus `×÷≤≥≠≈∞→←↑↓√°℃` and more, over sixty entries.
 
 | | Offline self-check | Live integration test |
 |---|---|---|
-| Checks | **58** | **16** |
+| Checks | **61** | **16** |
 | Method | Static assertions plus real functions executed in a `vm` sandbox | A local HTTP carrier driving the real engine |
 
 New assertions cover: sentence splitting (Chinese terminators, runs of them, the paragraph
@@ -1133,3 +1136,143 @@ audio (no `writeFileSync` into the audio directory, the byte ceiling, reclaiming
 per-sentence parameters (all three reaching the request, quality controls excluded, values
 clamped), and the conversation switch (both signals, when the fallback stands down, `null` not
 counting as a change).
+
+---
+
+### 19. v0.3.2: four reliability fixes (clip / turn / diagnostics)
+
+Every one of these came out of **reading the log**. They are all the same shape of problem: something
+the design said was bounded was not, or a contract was written down and never implemented.
+
+#### 19.1 A deliberate cancellation was reported as a failure
+
+`stop()` aborts a loading clip on purpose by clearing `audio.src` — that is the cancellation working
+as designed — but `audio.onerror` rejected with `new Error("audio playback failed")` unconditionally.
+
+In one measured log, **36 of 53** such reports followed a `turn-reset` within two seconds, and one
+arrived **17 ms after the click**, which is a synchronous `src` clear rather than a failed load.
+
+The generation now decides:
+
+```js
+audio.onerror = () => {
+  audio.onerror = null;
+  if (generation !== this.generation) { done(); return }   // a planned cancellation resolves quietly
+  ...
+}
+```
+
+#### 19.2 The retry the host promised was never written
+
+The host's `handleAudio` answers `clip-missing` for an evicted clip, and its own comment claims the
+client re-requests it:
+
+```js
+/*
+ * ... The client treats it as a miss and re-requests, which is
+ * why the route answers `clip-missing` rather than an empty 200.
+ */
+sendJson(res, 404, { ok: false, error: 'clip-missing' })
+```
+
+The client contained **zero** occurrences of `clip-missing` and **zero** of `404`. The comment
+described a contract that did not exist.
+
+Clips have been memory-only since v0.3.0, so a URL really does die with the host or with eviction,
+which is what made the gap matter. It is filled now, and the retry happens **once**:
+
+```js
+try { await this.playClip(url, generation) }
+catch (error) {
+  const missing = error instanceof Error && error.message === "clip-missing";
+  if (!missing || generation !== this.generation) throw error;
+  diag("clip-missing-retry", {});
+  url = await this.requestClip(chunks[index].text, generation, "cut5");
+  await this.playClip(url, generation);
+}
+```
+
+`clipErrorName(url)` was added alongside it: an `<audio>` element only offers a numeric
+`MediaError`, which cannot tell "the file is gone" from "the bytes are unplayable", so a failed load
+costs one `HEAD` request that lets **the host name its own error**.
+
+#### 19.3 One turn was reset eight times
+
+A measured turn advance:
+
+```
+13:08:08.923  turn-reset  turns:8  dropped:0
+13:08:08.924  turn-reset  turns:8  dropped:4   <- the only one that had anything to drop
+13:08:08.925  turn-reset  turns:8  dropped:0
+...
+```
+
+**Eight driver copies all saw the same turn**, and each ran `stop()` and `CLAIMED.clear()` for it. One
+log accumulated **1,005** of them.
+
+That is not merely noise: every copy called `stop()`, so **a clip a sibling had just started was
+aborted** — the direct source of the false reports in 19.1.
+
+The claim has to be **shared** (a remount resets a `useRef`, the same trap the session detector fell
+into) and it has to be taken **before the work**:
+
+```js
+let LAST_RESET_TURN = null;          // module scope
+
+if (LAST_RESET_TURN !== null && turnCount <= LAST_RESET_TURN) return;
+LAST_RESET_TURN = turnCount;         // claim first
+const dropped = player.pending.length;
+...
+player.stop();                       // a copy that lost the race never reaches here
+```
+
+Two details: a fresh mount **adopts** an existing claim
+(`if (LAST_RESET_TURN === null) LAST_RESET_TURN = turnCount`), otherwise it replays the turn it
+arrived with; and a conversation switch **drops** the claim, because `turnOrder` is a
+**workspace-wide** count and the new conversation's turn may already have been claimed by the old one.
+
+#### 19.4 The diagnostics became the problem
+
+| Symptom | Cause |
+|---|---|
+| about **1 MB of page memory per session** | every report was pushed into a module-level array that **production code never read** (only the `__test` export referenced it) |
+| `DIAG_SEEN` grew to **362** keys | `see-<messageId>` / `gate-<messageId>` are a new name per reply, so `{once:true}` **never once matched** |
+| `diag.log` passed **435 KB** with no ceiling | `appendFileSync` had no size check and no rotation |
+
+Fixed by deleting the write-only array, reducing **every id-bearing name to its family**
+(`see` / `gate` / `driver`) before deduplicating, rolling `diag.log` over to `diag.log.1` past
+**2 MB**, and giving `trimCache` a **512**-entry ceiling (it is keyed by content URL and previously
+only a restart cleared it).
+
+Measured: 200 simulated reports with distinct ids grow the set and the POST count by **2 each**.
+
+#### 19.5 A promise that never settles deadlocks the whole queue
+
+`drain()` awaits `this.playClip(...)`, and `draining` is only cleared in `finally`:
+
+```js
+if (this.draining) return;    // <- once playClip hangs, this returns forever
+```
+
+`playClip` has three legitimate exits (`ended`, `error`, and the tail-trim path that calls `ended` by
+hand). If none of them fires — a throttled background tab, a stalled decode, an element torn down
+without an event — **the queue stops permanently and only a page reload recovers it**.
+
+A watchdog now guarantees the promise settles:
+
+| Decision | Why |
+|---|---|
+| a very loose **180 s** | it only has to beat "never"; a tight value would **cut real audio** on a slow machine |
+| armed only after `play()` **resolves** | otherwise every cancelled clip leaves a timer behind, which on a switch is nearly all of them |
+| skipped quietly when `setTimeout` is absent | the sandbox has no timers — and it caught the first version's `ReferenceError` immediately |
+
+> **Stated plainly**: this one **cannot be verified offline**, because the sandbox has no timers. Its
+> guarantee is an argument — `drain()` awaits it and there is no fourth exit — not a measurement.
+
+#### 19.6 Two things cleaned up on the way
+
+- **A doc comment was duplicated** ("One sentence per request while streaming…"). The second copy sits
+  directly above the `blocks` computation it describes, so that is the one kept.
+- **`drain(words)` had a dead parameter**: declared and threaded through the recursive call, never
+  read. `enqueue` already bakes the words into each queued item — a dead parameter that survived a
+  refactor by being passed along.

@@ -6,6 +6,66 @@ All notable changes to this plugin are recorded here. The format follows
 
 ---
 
+## [0.3.2] — 2026-10-04
+
+Four reliability fixes, all of them found by reading a diagnostic log rather than by guessing. They
+share one shape: something the design said was bounded was not, or a contract was written down and
+never implemented.
+
+### Fixed
+
+- **A deliberate cancellation was reported as a playback failure.** `stop()` aborts a loading clip on
+  purpose by clearing `audio.src`, and `audio.onerror` rejected unconditionally — so a cancelled clip
+  looked like a broken one. Measured: 36 of 53 `audio playback failed` reports followed a `turn-reset`
+  within two seconds, one of them 17 ms after the click. A failed load is now checked against the
+  generation first, and resolves quietly when the player was the one who asked for it to stop.
+
+- **The retry the host promised was never written.** `handleAudio` answers `clip-missing` for an
+  evicted clip and its comment states that the client re-requests it; the client contained zero
+  occurrences of `clip-missing`. Clips have been memory-only since 0.3.0, so a URL really does die with
+  the host or with eviction. A lost clip is now re-synthesized once, and `clipErrorName(url)` asks the
+  host to name a load failure instead of guessing from a numeric `MediaError`.
+
+- **One turn was reset eight times.** Every mounted driver copy sees the turn number advance relative
+  to its own last render, so all of them ran `stop()` and `CLAIMED.clear()` for the same turn — 1,005
+  of them in one log. The duplication was not harmless: each copy's `stop()` aborted the clip a sibling
+  had just started, which is where most of the reports above came from. The claim now lives at module
+  scope (a remount resets a `useRef`) and is taken **before** the work, so a copy that loses the race
+  never reaches the player. A fresh mount adopts an existing claim; a conversation switch drops it,
+  because `turnOrder` is a workspace-wide count.
+
+- **A clip that never settles deadlocked the queue.** `drain()` awaits `playClip`, and `draining` is
+  only cleared in `finally`, so a promise that never settled stopped the queue until the page was
+  reloaded. A loose 180-second watchdog guarantees settlement, armed only after `play()` resolves so a
+  cancelled clip leaves no timer behind.
+
+### Changed
+
+- **The diagnostics were bounded.** Every report was pushed into a module-level array that production
+  code never read (~1 MB per session), `{once:true}` never matched the id-bearing names
+  (`see-<messageId>`, `gate-<messageId>`), and `diag.log` had no size check at all. The array is gone,
+  every id-bearing name is reduced to its family before deduplicating, `diag.log` rolls over to
+  `diag.log.1` past 2 MB, and `trimCache` gained a 512-entry ceiling. Measured: 200 simulated reports
+  with distinct ids now grow the set and the POST count by 2 each.
+
+- **Documentation was split.** The root [README.md](./README.md) is now project name, introduction,
+  core features, quick start and licence; the former full READMEs moved to
+  [docs/README.zh.md](./docs/README.zh.md) and [docs/README.en.md](./docs/README.en.md), which keep
+  every section they had and gained appendix 19 describing this release.
+
+### Removed
+
+- A duplicated doc comment ("One sentence per request while streaming…") and `drain(words)`'s dead
+  parameter, which was declared and threaded through the recursive call but never read.
+
+### Tests
+
+61 offline checks (up from 58). The three new ones cover the diagnostics ceilings in memory and on
+disk, a cancellation resolving quietly with a lost clip re-requested exactly once, and the turn claim
+being module-level, adopted by a remount and dropped by a restart.
+
+---
+
 ## [0.3.1] — 2026-10-04
 
 ### Fixed
