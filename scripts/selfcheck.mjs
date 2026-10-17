@@ -2209,6 +2209,55 @@ check('client: the reading marker points at the spoken line, and changes no audi
   return `source sentence carried beside each block; idle/stop fail closed; audio request untouched; marker in the overlay`
 })
 
+check('client: the reading marker is pinned horizontally and moves only vertically', () => {
+  /*
+   * The first version anchored the whale to the matched text's own left edge, so it jumped sideways
+   * between sentences: a range starts wherever its probe matched, which shifts with indentation, with
+   * a list, and with a sentence that begins mid-line. The anchor is now the **answer column** — the
+   * one x every ordinary block of reply text starts at — so only the vertical position follows the
+   * reading.
+   *
+   * The column is found as the *most common* left edge among the reply's block elements. That needs
+   * no class names, and it still resolves when every block in view happens to be indented (a reply
+   * that is all list), because the mode is taken over whatever is present.
+   */
+  const api = loadClient({ effects: false, env: fakeWindow() }).exports.__test
+
+  const scopeOf = (edges, width = 1200) => ({
+    clientWidth: width,
+    querySelectorAll: () => edges.map((left) => ({
+      getBoundingClientRect: () => ({ left, width: 600, height: 20, top: 0, bottom: 20 }),
+    })),
+  })
+
+  assert(api.answerColumnForTest(scopeOf([226, 226, 226, 252, 226, 252])) === 226,
+    'the column is the most common left edge, not the first one seen')
+  assert(api.answerColumnForTest(scopeOf([252, 252])) === 252,
+    'a view that is entirely indented still resolves to its own edge')
+  assert(api.answerColumnForTest(scopeOf([226])) === 226, 'a single block is enough to measure')
+  assert(api.answerColumnForTest(scopeOf([])) === null, 'an empty view reports null rather than a guess')
+
+  // The cache must follow a layout change: a sidebar toggle alters clientWidth without a resize event.
+  const scope = scopeOf([226, 226, 226])
+  assert(api.answerColumnForTest(scope) === 226, 'first measurement')
+  scope.querySelectorAll = () => [300, 300, 300].map((left) => ({
+    getBoundingClientRect: () => ({ left, width: 500, height: 20, top: 0, bottom: 20 }),
+  }))
+  assert(api.answerColumnLeft(scope) === 226, 'the same width must reuse the cached edge')
+  scope.clientWidth = 900
+  assert(api.answerColumnLeft(scope) === 300, 'a changed width must recompute the edge')
+
+  // And the placement must use that anchor: one character of gap, measured from the font size.
+  assert(/const anchorLeft = columnLeft === null \? rect\.left : columnLeft/.test(clientSource),
+    'placement must anchor on the column, falling back to the line only when it cannot be measured')
+  assert(/SOURCE_RANGE\.charWidth \* WHALE_GAP_CHARS/.test(clientSource),
+    'the gap must be one character of the reply font, not a fixed pixel count')
+  assert(!/rect\.left - size - WHALE_GAP\b/.test(clientSource),
+    'the old line-relative anchor must be gone')
+
+  return 'column measured as the mode left edge, cached on clientWidth, gap in characters, vertical-only movement'
+})
+
 check('host: the engine console is decoded as UTF-8, with a code-page fallback', () => {
   /*
    * Measured mojibake, reported by the user: Python on Windows encodes stdout/stderr with

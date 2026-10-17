@@ -10,7 +10,7 @@
 >
 > **The code is AI-written. The voice is trained by the author.**
 >
-> **Verification: all green** ✅ — 62 offline checks ✅ / 16 live-engine integration checks ✅ / button and auto-read confirmed by hand ✅
+> **Verification: all green** ✅ — 63 offline checks ✅ / 16 live-engine integration checks ✅ / button and auto-read confirmed by hand ✅
 >
 > Verified on: **Windows 11** · DSH desktop build (client contract `0.2.0-rc.2`) · Node **v24.21.0** · **RTX 5070 Ti (16 GB)** · Python **3.9.13** + torch **2.7.0+cu128** · GPT-SoVITS **v2Pro** @ `127.0.0.1:9880`
 >
@@ -181,7 +181,7 @@ The `/tts` body follows the `api_v2.py` contract: `media_type: "wav"`, `streamin
 
 ```sh
 # Offline: syntax, module-loading contract, slot names, text pipeline, store reads,
-# state directory, encoding (62 checks)
+# state directory, encoding (63 checks)
 node scripts/selfcheck.mjs
 
 # Live: real HTTP carrier plus the real engine, end to end (16 checks)
@@ -601,7 +601,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 
 > **The table below is the environment this code actually ran in with every test passing** — not a "recommended configuration", and not copied from documentation.
 >
-> Every row was measured on the machine; the **62 offline checks** and the **16 live-engine integration checks** both passed there, and the button and auto-read were confirmed by the author clicking them on this same machine.
+> Every row was measured on the machine; the **63 offline checks** and the **16 live-engine integration checks** both passed there, and the button and auto-read were confirmed by the author clicking them on this same machine.
 >
 > A different OS, DSH version or GPU is **plausible but untested** — if you hit trouble, please open an issue with your environment details.
 
@@ -679,7 +679,7 @@ lib/
 ├─ client.js       Client half: slot components, player and queue, text pipeline, settings UI
 └─ supervisor.py   Supervisor: windowless engine start, readiness wait, lifetime binding, log capture
 scripts/
-├─ selfcheck.mjs   62 offline checks (static assertions plus behavioural tests in a vm sandbox)
+├─ selfcheck.mjs   63 offline checks (static assertions plus behavioural tests in a vm sandbox)
 └─ integration.mjs 16 live checks (a real HTTP carrier plus the real engine)
 ```
 
@@ -1128,7 +1128,7 @@ plus `×÷≤≥≠≈∞→←↑↓√°℃` and more, over sixty entries.
 
 | | Offline self-check | Live integration test |
 |---|---|---|
-| Checks | **62** | **16** |
+| Checks | **63** | **16** |
 | Method | Static assertions plus real functions executed in a `vm` sandbox | A local HTTP carrier driving the real engine |
 
 New assertions cover: sentence splitting (Chinese terminators, runs of them, the paragraph
@@ -1342,7 +1342,20 @@ scroll containers* — neither inside the scroll container nor inside React's me
 | build a map | a parallel table of "reduced character → offset in the original text" |
 | find the sentence | `indexOf` the probe in the reduced text (again 10 → 3) |
 | take the line | `Range.getClientRects()[0]` — the **first line** of that sentence |
-| place it | `left = rect.left - width - 6`, vertically centred on the line |
+
+**The horizontal position is fixed; only the vertical one follows the sentence.** The anchor is not
+the matched text but the **answer column's left edge**:
+
+| How | Why |
+|---|---|
+| take every block element in the reply (`p` / `li` / `pre` / `blockquote` / headings / tables) and its `rect.left` | they all sit in one column |
+| use the **mode** of those edges | needs no class names, and still resolves when everything in view is indented |
+| cache on `clientWidth` | a resize and a sidebar toggle change it, scrolling does not — so it invalidates without a ResizeObserver |
+| gap of **one character** | measured from the prose's own `font-size`, not a fixed pixel count |
+
+The first version anchored to the matched text's own left edge, so it **jumped sideways on every
+sentence**: a range begins wherever its probe matched, which shifts with indentation, with a list, and
+with a sentence that starts mid-line.
 
 Scrolling is observed in the **capture** phase so a scroll *inside* the transcript is seen too, and
 re-positioning is throttled through `requestAnimationFrame`.

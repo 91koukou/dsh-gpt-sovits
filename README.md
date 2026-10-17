@@ -94,7 +94,7 @@ dsh plugin --profile desktop add github:91koukou/dsh-gpt-sovits
 ### 5. 验证安装
 
 ```sh
-node scripts/selfcheck.mjs      # 离线自检，62 项
+node scripts/selfcheck.mjs      # 离线自检，63 项
 node scripts/integration.mjs    # 真实引擎集成测试，16 项（需引擎已启动）
 ```
 

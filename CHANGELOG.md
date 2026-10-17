@@ -19,6 +19,11 @@ spoken, and moves down the reply as the reading advances.
   comes from a `Range` over the line's text, so it follows the line as it scrolls and re-flows.
   Hidden whenever nothing is being read, and hidden rather than clamped when the line is off screen.
 
+- **Fixed horizontally, moving only vertically.** The anchor is the answer column's left edge — taken
+  as the most common left edge among the reply's block elements, which needs no class names — and the
+  gap is one character measured from the prose's own font size. Anchoring to the matched text instead
+  made the whale jump sideways whenever a sentence started somewhere other than the column edge.
+
 - **The source sentence rides beside each queued block.** This is the part that made the feature
   possible and the part that has to stay invisible: the queue holds *cleaned* text (what the engine
   receives) while the page shows *rendered* text, so neither can be searched for directly. Each
@@ -36,10 +41,12 @@ spoken, and moves down the reply as the reading advances.
 
 ### Tests
 
-62 offline checks (up from 61). The new one covers the alignment against a short heading, a unit that
+63 offline checks (up from 61). The new one covers the alignment against a short heading, a unit that
 normalisation rewrites (`120km/h` → `120千米每小时`), an unplaceable code block, the fail-closed states
 of `currentSentence()`, and — as source facts — that the source sentence never enters the engine
-request and that the marker performs no DOM writes.
+request and that the marker performs no DOM writes. A second one pins the horizontal anchor: the
+column edge is the mode of the reply's block edges, the cache follows a layout change, and the gap is
+one character of the reply's own font.
 
 ---
 
