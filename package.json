@@ -1,8 +1,8 @@
 {
   "name": "dsh-gpt-sovits",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
-  "description": "GPT-SoVITS text-to-speech for the DeepSeek Harness web GUI: per-reply read-aloud, an auto-read toggle, native model switching and a settings page. Ships no model weights and no reference audio.",
+  "description": "GPT-SoVITS text-to-speech for the DeepSeek Harness web GUI: per-reply read-aloud, an auto-read toggle, a reading marker that tracks the sentence being spoken, native model switching and a settings page. Ships no model weights and no reference audio.",
   "keywords": [
     "dsh",
     "dsh-plugin",

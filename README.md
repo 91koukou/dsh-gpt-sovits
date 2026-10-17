@@ -1,6 +1,6 @@
 # dsh-gpt-sovits
 
-[![version](https://img.shields.io/badge/version-v0.3.2-blue)](./CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-v0.3.3-blue)](./CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20DSH%20desktop-lightgrey)
 
@@ -25,6 +25,7 @@ dsh plugin --profile desktop add github:91koukou/dsh-gpt-sovits
 |---|---|
 | **逐条朗读** | 每条定稿回复的操作条上有 🔊 按钮；播放中再点即停，点别的回复直接切换（单信道抢占） |
 | **自动朗读（排队）** | 输入栏左侧小喇叭开关。流式回复只读**新增且已到句号**的部分，**一句接一句念完，绝不打断正在念的那句**；同一条回复只读一次（刷新、切会话都不重复） |
+| **朗读标记 🐋** | 朗读时，正在念的那一行左侧会出现一只鲸鱼，换句跟着往下走。画在浮层里、不在消息 DOM 里，所以流式重渲染不会把它抹掉；找不到对应行就**不显示**，绝不指错位置 |
 | **启动问候** | 每 0.5 秒向空闲引擎请求一次问候语，**识别到引擎开始工作就停止**（状态每 0.1 秒检测）。它既是"插件活了"的信号，也顺带**预热引擎** |
 | **流式／总结分流** | 处理过程**一句一请求**（`cut0`，起播最早）；定稿总结**打包成块交给引擎切**（`cut5`，请求数少、快一倍） |
 | **新一轮取消上一轮** | 按外壳自己的轮次计数判定，新一轮开始清空待播队列、作废飞行中的合成；**轮次内不打断** |
@@ -93,7 +94,7 @@ dsh plugin --profile desktop add github:91koukou/dsh-gpt-sovits
 ### 5. 验证安装
 
 ```sh
-node scripts/selfcheck.mjs      # 离线自检，61 项
+node scripts/selfcheck.mjs      # 离线自检，62 项
 node scripts/integration.mjs    # 真实引擎集成测试，16 项（需引擎已启动）
 ```
 
@@ -117,6 +118,7 @@ node scripts/integration.mjs    # 真实引擎集成测试，16 项（需引擎�
 | `v0.3.0` | 中文分句补全、按标点插入停顿并裁掉引擎尾部静音、切换工作区取消朗读、音频改内存、逐句语速与情感 |
 | `v0.3.1` | **切换会话真正停播**：判据改为跨卸载重挂存活的模块级变量 |
 | `v0.3.2` | **四处可靠性修复**：计划内的取消不再被上报成播放失败、被淘汰的音频自动重新合成、一个回合只重置一次、诊断事件有了内存与磁盘上限 |
+| `v0.3.3` | **朗读标记**：正在念的那一行左侧出现 🐋 并随朗读下移；源句作为旁路元数据挂在队列上，音频逐字节不变 |
 
 版本变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
 
@@ -126,7 +128,7 @@ node scripts/integration.mjs    # 真实引擎集成测试，16 项（需引擎�
 
 | 文档 | 内容 |
 |---|---|
-| **[完整文档（中文）](./docs/README.zh.md)** | 前置条件、设计取舍、**附录：每项功能的实现方式**（文件/函数/参数/数据结构）、实测环境与性能、19 个"踩过的坑" |
+| **[完整文档（中文）](./docs/README.zh.md)** | 前置条件、设计取舍、**附录：每项功能的实现方式**（文件/函数/参数/数据结构）、实测环境与性能、20 个"踩过的坑" |
 | **[Full documentation (English)](./docs/README.en.md)** | 同上，英文 |
 | [CHANGELOG.md](./CHANGELOG.md) | 每个版本的变更明细 |
 | [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md) | **第三方代码复用的完整清单**（具体文件、具体语句、我做了哪些改动） |

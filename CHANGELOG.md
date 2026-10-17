@@ -6,6 +6,43 @@ All notable changes to this plugin are recorded here. The format follows
 
 ---
 
+## [0.3.3] — 2026-10-17
+
+A reading marker: while a reply is being spoken, a 🐋 sits to the left of the line that is being
+spoken, and moves down the reply as the reading advances.
+
+### Added
+
+- **The whale beside the spoken line.** It is drawn in the frame-wide overlay (`shell.overlay`), not
+  inside the message, so it is outside React's reconciliation — the conversation re-renders on every
+  streamed token, and a node written into a paragraph would be removed on the next render. Position
+  comes from a `Range` over the line's text, so it follows the line as it scrolls and re-flows.
+  Hidden whenever nothing is being read, and hidden rather than clamped when the line is off screen.
+
+- **The source sentence rides beside each queued block.** This is the part that made the feature
+  possible and the part that has to stay invisible: the queue holds *cleaned* text (what the engine
+  receives) while the page shows *rendered* text, so neither can be searched for directly. Each
+  block now carries the Markdown sentence it came from, as a side channel — the text sent for
+  synthesis, the split method and the pause are untouched, and a self-check asserts that the source
+  never reaches the engine request.
+
+- **A setting for it**, on by default, in the playback card of the settings page. It is a per-browser
+  viewing preference like volume and speed, so it applies immediately and needs no save.
+
+### Fixed
+
+- **Nothing in the audio path changed.** The alignment is computed after the blocks are built and
+  attached as metadata; `block.text`, `splitMethod` and `pause` are byte-for-byte what they were.
+
+### Tests
+
+62 offline checks (up from 61). The new one covers the alignment against a short heading, a unit that
+normalisation rewrites (`120km/h` → `120千米每小时`), an unplaceable code block, the fail-closed states
+of `currentSentence()`, and — as source facts — that the source sentence never enters the engine
+request and that the marker performs no DOM writes.
+
+---
+
 ## [0.3.2] — 2026-10-04
 
 Four reliability fixes, all of them found by reading a diagnostic log rather than by guessing. They

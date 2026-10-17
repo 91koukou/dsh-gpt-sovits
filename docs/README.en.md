@@ -10,7 +10,7 @@
 >
 > **The code is AI-written. The voice is trained by the author.**
 >
-> **Verification: all green** ✅ — 61 offline checks ✅ / 16 live-engine integration checks ✅ / button and auto-read confirmed by hand ✅
+> **Verification: all green** ✅ — 62 offline checks ✅ / 16 live-engine integration checks ✅ / button and auto-read confirmed by hand ✅
 >
 > Verified on: **Windows 11** · DSH desktop build (client contract `0.2.0-rc.2`) · Node **v24.21.0** · **RTX 5070 Ti (16 GB)** · Python **3.9.13** + torch **2.7.0+cu128** · GPT-SoVITS **v2Pro** @ `127.0.0.1:9880`
 >
@@ -114,6 +114,7 @@ Each release is anchored by a tag, so **an older version is never overwritten by
 | `v0.3.0` | Full Chinese sentence terminators and paragraph boundaries, punctuation-driven pauses with the engine's trailing silence trimmed, a workspace switch cancels the reading, memory-only audio, per-sentence speed and expression |
 | `v0.3.1` | **A conversation switch really does stop the voice**: the signal moved to a module-level value that survives the unmount-and-remount (0.3.0 kept it in the component's `useRef`, and a session slot is re-keyed per session, so it never fired); an unmounting driver also releases its audio element |
 | `v0.3.2` | **Four reliability fixes**: a deliberate cancellation is no longer reported as a playback failure, an evicted clip is re-synthesized, one turn resets the queue once instead of once per driver copy, and the diagnostics have memory and disk ceilings |
+| `v0.3.3` | **Reading marker**: a 🐋 beside the line being spoken, following the reading; the source sentence rides beside each queued block, and the audio is byte-for-byte unchanged |
 
 Per-version changes are listed in [CHANGELOG.md](../CHANGELOG.md).
 
@@ -180,7 +181,7 @@ The `/tts` body follows the `api_v2.py` contract: `media_type: "wav"`, `streamin
 
 ```sh
 # Offline: syntax, module-loading contract, slot names, text pipeline, store reads,
-# state directory, encoding (61 checks)
+# state directory, encoding (62 checks)
 node scripts/selfcheck.mjs
 
 # Live: real HTTP carrier plus the real engine, end to end (16 checks)
@@ -600,7 +601,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 
 > **The table below is the environment this code actually ran in with every test passing** — not a "recommended configuration", and not copied from documentation.
 >
-> Every row was measured on the machine; the **61 offline checks** and the **16 live-engine integration checks** both passed there, and the button and auto-read were confirmed by the author clicking them on this same machine.
+> Every row was measured on the machine; the **62 offline checks** and the **16 live-engine integration checks** both passed there, and the button and auto-read were confirmed by the author clicking them on this same machine.
 >
 > A different OS, DSH version or GPU is **plausible but untested** — if you hit trouble, please open an issue with your environment details.
 
@@ -616,7 +617,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 | GPT-SoVITS checkout | `GPT-SoVITS-v2pro-20250604-nvidia50` (with every `GPT_weights` … `v4` and `SoVITS_weights` … `v4` directory present) |
 | Model version actually used | **v2Pro** |
 | Engine endpoint | `http://127.0.0.1:9880` |
-| Plugin version | v0.3.2 |
+| Plugin version | v0.3.3 |
 
 **Measured latency** (same machine, `sample_steps 32`, reference transcript filled in):
 
@@ -678,7 +679,7 @@ lib/
 ├─ client.js       Client half: slot components, player and queue, text pipeline, settings UI
 └─ supervisor.py   Supervisor: windowless engine start, readiness wait, lifetime binding, log capture
 scripts/
-├─ selfcheck.mjs   61 offline checks (static assertions plus behavioural tests in a vm sandbox)
+├─ selfcheck.mjs   62 offline checks (static assertions plus behavioural tests in a vm sandbox)
 └─ integration.mjs 16 live checks (a real HTTP carrier plus the real engine)
 ```
 
@@ -1127,7 +1128,7 @@ plus `×÷≤≥≠≈∞→←↑↓√°℃` and more, over sixty entries.
 
 | | Offline self-check | Live integration test |
 |---|---|---|
-| Checks | **61** | **16** |
+| Checks | **62** | **16** |
 | Method | Static assertions plus real functions executed in a `vm` sandbox | A local HTTP carrier driving the real engine |
 
 New assertions cover: sentence splitting (Chinese terminators, runs of them, the paragraph
@@ -1276,3 +1277,94 @@ A watchdog now guarantees the promise settles:
 - **`drain(words)` had a dead parameter**: declared and threaded through the recursive call, never
   read. `enqueue` already bakes the words into each queued item — a dead parameter that survived a
   refactor by being passed along.
+
+---
+
+### 20. The reading marker: a 🐋 beside the line being spoken
+
+While a reply is read aloud, a 🐋 sits to the left of the line currently being spoken and moves down
+the reply as the reading advances. This section is about why that is harder than it sounds.
+
+#### Three different texts
+
+| | What it is | Who knows it |
+|---|---|---|
+| ① **source** | the Markdown as written | what the page renders from |
+| ② **cleaned** | symbols spoken as words, units expanded, URLs replaced | **the only one the player knew** |
+| ③ **rendered** | `**`, `#` and link syntax already gone | what the page shows |
+
+② and ③ never agree (② says `cmd点exe`, ③ shows `cmd.exe`), so searching one for the other cannot
+work.
+
+#### The fix: carry the source sentence as a side channel
+
+The cleaning and splitting pipeline is **unchanged, byte for byte**. The alignment is computed
+afterwards, beside it:
+
+```js
+const blockSources = alignSourceSentences(usable, blocks);
+this.pending.push({ text: block.text, ..., source: blockSources[index] ?? null });
+```
+
+What `alignSourceSentences` does:
+
+| Step | Why |
+|---|---|
+| splits the source with the **same structure** (paragraph → line → `segmentSentence`) | `splitIntoSentences` cannot be reused: it merges short sentences and splits long ones, so its output is not the author's sentence list |
+| reduces both sides to "no Markdown, no spaces" (`plainForMatch`) | the only form in which source and rendered text can be compared |
+| scans **forward only** (a cursor) | blocks are consumed in order, which removes the ambiguity a repeated sentence would otherwise create |
+| narrows the probe **8 → 6 → 5 → 4 → 3** | normalisation rewrites a sentence past its opening characters: `120km/h` becomes `120千米每小时`, so an eight-character probe never matches while `速度是120k` does |
+| falls back to "**the block starts with the cursor's unit**" | a merged block can open with a two-character heading (`## 标题`), and every probe spans the boundary |
+
+A block that cannot be placed returns `null` and the UI draws **nothing** — it never guesses a
+position.
+
+#### Why the overlay rather than the message
+
+**The message DOM re-renders on every streamed token.** A node written into a paragraph is removed by
+React on the next render: the whale would flicker and then vanish. So it registers into:
+
+```js
+ctx.slots.inject("shell.overlay", () => ctx.slots.register(
+  { name: "shell.overlay", id: "gpt-sovits-whale", order: 100 },
+  WhaleMarker,
+));
+```
+
+`shell.overlay` is documented as the *frame-wide floating layer, above every column and outside their
+scroll containers* — neither inside the scroll container nor inside React's message reconciliation.
+
+#### Computing the position
+
+| Step | How |
+|---|---|
+| collect text | a `TreeWalker` over text nodes, **concatenated** — one sentence is routinely split by bold or inline code |
+| build a map | a parallel table of "reduced character → offset in the original text" |
+| find the sentence | `indexOf` the probe in the reduced text (again 10 → 3) |
+| take the line | `Range.getClientRects()[0]` — the **first line** of that sentence |
+| place it | `left = rect.left - width - 6`, vertically centred on the line |
+
+Scrolling is observed in the **capture** phase so a scroll *inside* the transcript is seen too, and
+re-positioning is throttled through `requestAnimationFrame`.
+
+#### Three deliberate degradations
+
+| Situation | Behaviour | Why |
+|---|---|---|
+| nothing is being spoken | hidden | `currentSentence()` asks `playing \|\| busy` first, so every path that forgets to clear the field **fails closed** |
+| the line is off screen | hidden, **not clamped** | a whale pinned to the viewport edge while its line is far away is a lie |
+| the sentence is not in the DOM | hidden, plus a `diag` entry | nothing is better than something in the wrong place |
+
+#### Why the audio cannot change
+
+A self-check guards this as an **architectural** fact:
+
+```js
+assert(/body: JSON.stringify\(\{ text: chunk, splitMethod/.test(clientSource),
+  'the engine request must carry the cleaned chunk and nothing else')
+assert(!/requestClip\([^)]*source/.test(clientSource),
+  'the source sentence must never be sent for synthesis')
+```
+
+The source sentence enters the `pending` array and never the request body. `block.text`,
+`splitMethod` and `pause` are byte-for-byte what they were before this feature existed.

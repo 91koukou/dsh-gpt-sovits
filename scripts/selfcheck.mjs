@@ -586,6 +586,7 @@ check('client: registers the four slots against live names', () => {
     'conversation.chat.assistant-actions',
     'conversation.chat.turnTail',
     'conversation.input.left',
+    'shell.overlay',
     'settings.section',
   ]) {
     assert(names.includes(expected), `slot not registered: ${expected}`)
@@ -593,6 +594,12 @@ check('client: registers the four slots against live names', () => {
   for (const row of registered) {
     assert(typeof row.id === 'string' && row.id !== '', `slot ${row.name} needs an id`)
     assert(typeof row.order === 'number', `slot ${row.name} needs an order`)
+    /*
+     * `inject` is what supplies `t` and the chat hook to the components that read them. The overlay
+     * entry reads neither — it needs no props at all — and the slot catalog lists only `id`, `order`
+     * and `label` for `shell.overlay`, so requiring an injector there would be inventing a rule.
+     */
+    if (row.name === 'shell.overlay') continue
     assert(typeof row.inject === 'function', `slot ${row.name} needs an inject()`)
   }
   return names.join(', ')
@@ -2120,6 +2127,88 @@ await check('client: one turn is claimed once, and a remount does not replay it'
 
   return `the claim is module-level and settles on one turn across copies (${claimedAt}), a remount does not replay it, and a restart drops it`
 })
+check('client: the reading marker points at the spoken line, and changes no audio', () => {
+  /*
+   * The feature: a 🐋 beside the line being read. Its whole difficulty is that three different texts
+   * exist — the Markdown source, the cleaned text sent to the engine, and the rendered page — and the
+   * player only ever knew the second one. The queue therefore carries the **source** sentence beside
+   * each block, as a side channel.
+   *
+   * The check is in two halves, and the second matters more than the first: the marker must not be
+   * able to change what is spoken. That is why the source field is asserted to stay out of the engine
+   * request, and why the marker is asserted to live in the overlay rather than in the message DOM.
+   */
+  const marker = loadClient({ effects: false, env: fakeWindow() }).exports.__test
+  const words = { link: '链接', path: '路径', id: '编号', code: '长代码', codeBlock: '代码块我不想读' }
+
+  /** Reproduce `enqueue`'s pipeline without the drain, so the mapping is what is under test. */
+  const map = (reply, complete = true) => {
+    const cleaned = marker.cleanForSpeech(reply, words)
+    const sentences = marker.splitIntoSentences(cleaned)
+    const blocks = complete
+      ? marker.splitIntoBlocks(sentences, 160)
+      : sentences.map((sentence) => ({ text: sentence.text, pause: sentence.pause }))
+    return marker.alignSourceSentences(reply, blocks)
+  }
+
+  // A short heading followed by sentences is the case that broke the first implementation: the block
+  // begins with a two-character unit, so no probe could span it.
+  const heading = map('## 标题\n\n这是第一句。这是第二句！')
+  assert(heading[0] === '## 标题', `a merged block must map to the unit it starts with, got ${JSON.stringify(heading[0])}`)
+
+  // Normalisation rewrites units beyond their first characters; the probe narrows to survive that.
+  const units = map('速度是 120km/h，命令是 \`cmd.exe\`。')
+  assert(units[0] !== null && units[0].includes('120km/h'), `a rewritten unit must still map, got ${JSON.stringify(units[0])}`)
+
+  // An unplaceable block reports null rather than guessing, which the UI draws nothing for.
+  const code = map('看这段代码。\n\n\`\`\`js\nconst a = 1;\n\`\`\`')
+  assert(Array.isArray(code), 'alignment always returns an array')
+  assert(code.every((entry) => entry === null || typeof entry === 'string'), 'entries are a source string or null')
+
+  // Fails closed: no sentence, no marker.
+  const player = marker.player
+  assert(player.currentSentence() === null, 'an idle player must offer no marker target')
+  player.busy = true
+  player.currentSource = '第一句。'
+  player.currentMessage = 'msg-1'
+  const active = player.currentSentence()
+  assert(active !== null && active.source === '第一句。' && active.message === 'msg-1',
+    `a speaking player must expose its source sentence, got ${JSON.stringify(active)}`)
+  player.stop()
+  assert(player.currentSentence() === null, 'stop() must leave no marker target')
+
+  // Every DOM lookup may fail; the only acceptable failure is "draw nothing".
+  assert(marker.rectForSourceSentence('第一句。', 'msg-1') === null,
+    'without a transcript, locating a sentence must return null rather than throw')
+
+  /*
+   * The second half: nothing above may reach the engine, and the marker may not write into the
+   * message DOM. Both are checked as source facts because they are architectural, not behavioural —
+   * a later refactor that "helpfully" passes the source along, or mounts the whale into a paragraph,
+   * would pass the behavioural half above while breaking exactly what this protects.
+   */
+  assert(/body: JSON.stringify\(\{ text: chunk, splitMethod/.test(clientSource),
+    'the engine request must carry the cleaned chunk and nothing else')
+  assert(!/requestClip\([^)]*source/.test(clientSource), 'the source sentence must never be sent for synthesis')
+  assert(/name: "shell\.overlay"/.test(clientSource), 'the marker must live in the frame-wide overlay')
+  /*
+   * Scoped to the marker's own code on purpose: `insertAdjacentElement` elsewhere in the bundle is
+   * the read-aloud button placing itself after the branch action, which is a different feature and
+   * deliberately does write to the DOM. What must not mutate is the **marker**.
+   */
+  const markerBody = clientSource.slice(
+    clientSource.indexOf('const WHALE_GLYPH'),
+    clientSource.indexOf('/** Shared visual language for the settings page rows. */'),
+  )
+  assert(markerBody.length > 500, 'the marker code must be found for inspection')
+  assert(!/appendChild|insertAdjacent|innerHTML|outerHTML/.test(markerBody),
+    'the marker must not mutate the message DOM, which React re-renders on every token')
+  assert(/createRange\(\)/.test(markerBody), 'the marker reads position through a Range, which writes nothing')
+  assert(/pointerEvents: "none"/.test(clientSource), 'the marker must not intercept clicks')
+
+  return `source sentence carried beside each block; idle/stop fail closed; audio request untouched; marker in the overlay`
+})
+
 check('host: the engine console is decoded as UTF-8, with a code-page fallback', () => {
   /*
    * Measured mojibake, reported by the user: Python on Windows encodes stdout/stderr with
