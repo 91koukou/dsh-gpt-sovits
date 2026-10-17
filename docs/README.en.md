@@ -1341,7 +1341,17 @@ scroll containers* — neither inside the scroll container nor inside React's me
 | collect text | a `TreeWalker` over text nodes, **concatenated** — one sentence is routinely split by bold or inline code |
 | build a map | a parallel table of "reduced character → offset in the original text" |
 | find the sentence | `indexOf` the probe in the reduced text (again 10 → 3) |
-| take the line | `Range.getClientRects()[0]` — the **first line** of that sentence |
+| find the end | search forward from there for the block's **last** sentence, so the range covers the whole block |
+| take the lines | `getClientRects()` — **every line** the block occupies, one whale each |
+
+**Why every line rather than the first.** A settled reply is **packed** before synthesis: one queue item
+can hold three sentences, and the engine returns the whole block as **one clip**. So the plugin knows
+which sentences the block contains, but not which one is audible at this instant — it plays a block,
+not a sentence.
+
+The first version marked only the block's opening sentence, so once the reading moved past it the whale
+sat on the wrong line. Marking every line the block occupies is the honest answer to "what is being read
+right now".
 
 **The horizontal position is fixed; only the vertical one follows the sentence.** The anchor is not
 the matched text but the **answer column's left edge**:
@@ -1366,7 +1376,8 @@ re-positioning is throttled through `requestAnimationFrame`.
 |---|---|---|
 | nothing is being spoken | hidden | `currentSentence()` asks `playing \|\| busy` first, so every path that forgets to clear the field **fails closed** |
 | the line is off screen | hidden, **not clamped** | a whale pinned to the viewport edge while its line is far away is a lie |
-| the sentence is not in the DOM | hidden, plus a `diag` entry | nothing is better than something in the wrong place |
+| the block is not in the DOM | hidden, plus a `diag` entry | nothing is better than something in the wrong place |
+| the block spans more lines than the pool (12) | only the first 12 are marked | a block is at most 160 characters, which does not reach 12 lines at any readable width |
 
 #### Why the audio cannot change
 

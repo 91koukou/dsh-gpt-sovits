@@ -24,6 +24,13 @@ spoken, and moves down the reply as the reading advances.
   gap is one character measured from the prose's own font size. Anchoring to the matched text instead
   made the whale jump sideways whenever a sentence started somewhere other than the column edge.
 
+- **One whale per line of the spoken block.** A settled reply is packed before synthesis, so one
+  queue item can hold several sentences and the engine returns them as one clip: the plugin knows
+  which sentences the block contains but not which one is audible at any instant. The block now
+  carries both its first and last sentence (`splitIntoBlocks` reports the range it packed), the
+  located span covers all of it, and every line it occupies gets a whale. Marking only the first
+  line put the whale on the wrong line as soon as the reading moved past the block's first sentence.
+
 - **The source sentence rides beside each queued block.** This is the part that made the feature
   possible and the part that has to stay invisible: the queue holds *cleaned* text (what the engine
   receives) while the page shows *rendered* text, so neither can be searched for directly. Each

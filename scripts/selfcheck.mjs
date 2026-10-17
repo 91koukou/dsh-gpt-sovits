@@ -2178,8 +2178,10 @@ check('client: the reading marker points at the spoken line, and changes no audi
   assert(player.currentSentence() === null, 'stop() must leave no marker target')
 
   // Every DOM lookup may fail; the only acceptable failure is "draw nothing".
-  assert(marker.rectForSourceSentence('第一句。', 'msg-1') === null,
-    'without a transcript, locating a sentence must return null rather than throw')
+  assert(marker.rectForSourceSentence('第一句。', '第一句。', 'msg-1') === null,
+    'without a transcript, locating a block must return null rather than throw')
+  assert(Array.isArray(marker.rectsForSourceSentence('第一句。', '第一句。', 'msg-1')),
+    'the per-line lookup must return an array, empty when nothing can be placed')
 
   /*
    * The second half: nothing above may reach the engine, and the marker may not write into the
@@ -2206,7 +2208,37 @@ check('client: the reading marker points at the spoken line, and changes no audi
   assert(/createRange\(\)/.test(markerBody), 'the marker reads position through a Range, which writes nothing')
   assert(/pointerEvents: "none"/.test(clientSource), 'the marker must not intercept clicks')
 
-  return `source sentence carried beside each block; idle/stop fail closed; audio request untouched; marker in the overlay`
+  /*
+   * A packed block is one clip of several sentences, so the plugin cannot say which of them is
+   * audible right now — and marking only the first line put the whale on the wrong line as soon as
+   * the reading moved past it. The block therefore carries its **last** sentence as well, and the
+   * marker draws one whale per line the span covers.
+   */
+  const span = map('第一句。第二句。第三句。')
+  assert(span.length > 0, 'the span reply must produce at least one block')
+  assert(/sourceEnd: last/.test(clientSource), 'the queue item must carry the block end')
+  assert(/sentenceSources\[block\.to/.test(clientSource), 'the end must be the last sentence the block covers')
+  assert(/const first = sentenceSources\[block\.from/.test(clientSource), 'the start must be the first sentence the block covers')
+
+  // The block range is what makes that possible: splitIntoBlocks must report which sentences it packed.
+  const packed = marker.splitIntoBlocks(marker.splitIntoSentences('甲。乙。丙。丁。'), 4)
+  assert(packed.length >= 2, 'a small max must pack into several blocks, got ' + packed.length)
+  assert(packed.every((entry) => typeof entry.from === 'number' && typeof entry.to === 'number'),
+    'every block must report its sentence range')
+  assert(packed[0].from === 0, 'the first block starts at sentence zero')
+  for (let index = 1; index < packed.length; index += 1) {
+    assert(packed[index].from === packed[index - 1].to + 1,
+      'block ' + index + ' must start right after the previous one ends')
+  }
+  assert(packed.reduce((total, entry) => total + (entry.to - entry.from + 1), 0) === 4,
+    'the ranges must cover every sentence exactly once')
+
+  // One whale per line, from a fixed pool: the overlay is not allowed to grow while reading.
+  assert(/const WHALE_POOL = \d+/.test(clientSource), 'the whale pool must be a fixed size')
+  assert(/for \(const rect of rects\)/.test(clientSource), 'placement must iterate every line rect')
+  assert(/hideFrom\(used\)/.test(clientSource), 'unused pool entries must be hidden, not left behind')
+
+  return 'source sentence + block end carried beside each block; one whale per line; idle/stop fail closed'
 })
 
 check('client: the reading marker is pinned horizontally and moves only vertically', () => {
