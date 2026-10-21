@@ -68,8 +68,62 @@ check('host: parses as an ES module', () => {
 check('host: declares the expected exports', () => {
   assert(/export const name = 'gpt-sovits'/.test(hostSource), 'missing `name` export')
   assert(/export const Config = Schema\.object\(/.test(hostSource), 'missing `Config` schema')
-  assert(/export function apply\(ctx, config\)/.test(hostSource), 'missing `apply(ctx, config)`')
+  // `apply` is async because the memory gate consults the plugin manager before mounting anything.
+  assert(/export (async )?function apply\(ctx, config\)/.test(hostSource), 'missing `apply(ctx, config)`')
   return 'name + Config + apply(ctx, config)'
+})
+
+check('host: the startup memory gate is a pure rule with safe defaults', () => {
+  /*
+   * The gate decides whether the next launch may start the engine, so its rule is the one piece
+   * here that must not be reasoned about — it is lifted and executed.
+   *
+   * The load-bearing properties are the *fail-open* ones: a disabled gate, an unreadable reading and
+   * a non-numeric reading must all let the engine start. Withholding it because a probe failed would
+   * be worse than the memory pressure this guards against.
+   */
+  const clamp = extractFunction(hostSource, 'clampNumber')
+  const verdict = extractFunction(hostSource, 'memoryVerdict')
+  const sandbox = {}
+  vm.createContext(sandbox)
+  vm.runInContext(clamp + '\n' + verdict + '\nglobalThis.__verdict = memoryVerdict', sandbox)
+  const gate = sandbox.__verdict
+  const GB = 1024 * 1024 * 1024
+
+  assert(gate({ freeBytes: 4.2 * GB, thresholdMb: 4096 }).gated === false, 'above the line must start')
+  assert(gate({ freeBytes: 3.9 * GB, thresholdMb: 4096 }).gated === true, 'below the line must hold the engine')
+  // Equality passes: the rule is "below the line", not "at or below".
+  assert(gate({ freeBytes: 4.0 * GB, thresholdMb: 4096 }).gated === false, 'exactly on the line must start')
+
+  assert(gate({ freeBytes: 1 * GB, thresholdMb: 4096, enabled: false }).gated === false,
+    'a gate the user turned off must never hold the engine')
+  assert(gate({ freeBytes: undefined, thresholdMb: 4096 }).gated === false,
+    'an unreadable reading must let the engine start')
+  assert(gate({ freeBytes: Number.NaN, thresholdMb: 4096 }).gated === false, 'a NaN reading must start')
+  assert(gate({ freeBytes: -1, thresholdMb: 4096 }).gated === false, 'a negative reading must start')
+  assert(gate({}).gated === false, 'an empty input must start')
+
+  assert(gate({ freeBytes: 1 * GB, thresholdMb: 0 }).thresholdMb === 512, 'the threshold must clamp up to 512 MB')
+  assert(gate({ freeBytes: 1 * GB, thresholdMb: 1e9 }).thresholdMb === 32768, 'the threshold must clamp down')
+  assert(gate({ freeBytes: 1 * GB }).thresholdMb === 4096, 'the default threshold is 4.0 GB')
+
+  /*
+   * Wiring, as source facts. Four properties matter and none of them is reachable by behaviour
+   * alone: the decision is taken before the engine is given any chance to start, it stops only the
+   * automatic callers, a manual start overrides it, and the plugin itself is never switched off.
+   */
+  assert(/if \(gateBlocksEngineStart\(\)\) return/.test(hostSource),
+    'the boot path must stand down before it probes or launches the engine')
+  assert(/if \(reason !== 'request' && gateBlocksEngineStart\(\)\)/.test(hostSource),
+    'only automatic callers are gated, so a manual start still gets through')
+  assert(/startupGate\.bypassed = true/.test(hostSource),
+    'a manual start must retire the gate for the rest of the launch')
+  assert(/note: 'memory-gate'/.test(hostSource),
+    'the refusal must name the gate, not look like a launcher failure')
+  assert(!/setPluginEnabled\(/.test(hostSource),
+    'the gate must withhold the engine, never disable the plugin')
+
+  return 'below the line holds the engine, equality starts, every failure starts, the plugin always loads'
 })
 
 check('host: registers both routes with the webserver contract', () => {

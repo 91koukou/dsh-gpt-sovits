@@ -10,7 +10,7 @@
 >
 > **The code is AI-written. The voice is trained by the author.**
 >
-> **Verification: all green** ✅ — 61 offline checks ✅ / 16 live-engine integration checks ✅ / button and auto-read confirmed by hand ✅
+> **Verification: all green** ✅ — 62 offline checks ✅ / 16 live-engine integration checks ✅ / button and auto-read confirmed by hand ✅
 >
 > Verified on: **Windows 11** · DSH desktop build (client contract `0.2.0-rc.2`) · Node **v24.21.0** · **RTX 5070 Ti (16 GB)** · Python **3.9.13** + torch **2.7.0+cu128** · GPT-SoVITS **v2Pro** @ `127.0.0.1:9880`
 >
@@ -114,6 +114,7 @@ Each release is anchored by a tag, so **an older version is never overwritten by
 | `v0.3.0` | Full Chinese sentence terminators and paragraph boundaries, punctuation-driven pauses with the engine's trailing silence trimmed, a workspace switch cancels the reading, memory-only audio, per-sentence speed and expression |
 | `v0.3.1` | **A conversation switch really does stop the voice**: the signal moved to a module-level value that survives the unmount-and-remount (0.3.0 kept it in the component's `useRef`, and a session slot is re-keyed per session, so it never fired); an unmounting driver also releases its audio element |
 | `v0.3.2` | **Four reliability fixes**: a deliberate cancellation is no longer reported as a playback failure, an evicted clip is re-synthesized, one turn resets the queue once instead of once per driver copy, and the diagnostics have memory and disk ceilings |
+| `v0.3.3` | **Startup memory check**: free memory is read on each DSH launch, and below 4.0 GB (adjustable) the engine is not started; the plugin itself stays loaded, the status card explains why, and the engine can be started by hand |
 
 Per-version changes are listed in [CHANGELOG.md](../CHANGELOG.md).
 
@@ -180,7 +181,7 @@ The `/tts` body follows the `api_v2.py` contract: `media_type: "wav"`, `streamin
 
 ```sh
 # Offline: syntax, module-loading contract, slot names, text pipeline, store reads,
-# state directory, encoding (61 checks)
+# state directory, encoding (62 checks)
 node scripts/selfcheck.mjs
 
 # Live: real HTTP carrier plus the real engine, end to end (16 checks)
@@ -600,7 +601,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 
 > **The table below is the environment this code actually ran in with every test passing** — not a "recommended configuration", and not copied from documentation.
 >
-> Every row was measured on the machine; the **61 offline checks** and the **16 live-engine integration checks** both passed there, and the button and auto-read were confirmed by the author clicking them on this same machine.
+> Every row was measured on the machine; the **62 offline checks** and the **16 live-engine integration checks** both passed there, and the button and auto-read were confirmed by the author clicking them on this same machine.
 >
 > A different OS, DSH version or GPU is **plausible but untested** — if you hit trouble, please open an issue with your environment details.
 
@@ -616,7 +617,7 @@ Worth noting: it **did not understand its own host at first**. Its opening attem
 | GPT-SoVITS checkout | `GPT-SoVITS-v2pro-20250604-nvidia50` (with every `GPT_weights` … `v4` and `SoVITS_weights` … `v4` directory present) |
 | Model version actually used | **v2Pro** |
 | Engine endpoint | `http://127.0.0.1:9880` |
-| Plugin version | v0.3.2 |
+| Plugin version | v0.3.3 |
 
 **Measured latency** (same machine, `sample_steps 32`, reference transcript filled in):
 
@@ -678,7 +679,7 @@ lib/
 ├─ client.js       Client half: slot components, player and queue, text pipeline, settings UI
 └─ supervisor.py   Supervisor: windowless engine start, readiness wait, lifetime binding, log capture
 scripts/
-├─ selfcheck.mjs   61 offline checks (static assertions plus behavioural tests in a vm sandbox)
+├─ selfcheck.mjs   62 offline checks (static assertions plus behavioural tests in a vm sandbox)
 └─ integration.mjs 16 live checks (a real HTTP carrier plus the real engine)
 ```
 
@@ -1127,7 +1128,7 @@ plus `×÷≤≥≠≈∞→←↑↓√°℃` and more, over sixty entries.
 
 | | Offline self-check | Live integration test |
 |---|---|---|
-| Checks | **61** | **16** |
+| Checks | **62** | **16** |
 | Method | Static assertions plus real functions executed in a `vm` sandbox | A local HTTP carrier driving the real engine |
 
 New assertions cover: sentence splitting (Chinese terminators, runs of them, the paragraph
@@ -1276,3 +1277,77 @@ A watchdog now guarantees the promise settles:
 - **`drain(words)` had a dead parameter**: declared and threaded through the recursive call, never
   read. `enqueue` already bakes the words into each queued item — a dead parameter that survived a
   refactor by being passed along.
+
+---
+
+### 20. The startup memory check: read memory first, then decide about the engine
+
+The engine is a three-to-four gigabyte process. Starting it on a machine that cannot fit it does not
+make things slow — it takes the desktop down (measured: a 15.5 GB machine with the engine running and
+a few applications open reached a system-wide out-of-memory failure). The startup sequence therefore
+has two stages: **one memory reading, and only then the engine.**
+
+#### The rule
+
+```js
+memoryVerdict({ freeBytes, thresholdMb, enabled })
+// freeBytes comes from os.freemem() (available physical memory on Windows)
+// below the line -> gated: true
+```
+
+Three decisions are deliberate:
+
+| Rule | Why |
+|---|---|
+| `enabled: false` short-circuits **before** the measurement | A check the user turned off must not be overruled by a reading |
+| A reading that is not a finite number -> **let it start** | Withholding the engine because a probe failed is worse than memory pressure |
+| **Equality passes** | The rule is "below", not "below or equal" |
+
+The line is **4096 MB (4.0 GB)** by default and is adjustable in the settings page between 512 MB and
+32 GB. Both the switch and the threshold live in `settings.json` (not localStorage), because the
+decision is taken before the plugin mounts anything, when no browser exists yet.
+
+#### The gate withholds the engine, not the plugin
+
+When memory is short the **plugin still loads**: the settings page, the engine console, the model
+list and the diagnostics all stay, and the only thing held back is the three-to-four-gigabyte child
+process. That keeps "why is there no sound" readable in the settings page instead of first discovering
+that the plugin has vanished and then hunting for it in the plugin manager.
+
+The decision is taken **once per DSH launch**, before anything is mounted:
+
+```js
+const startupGate = { ...memoryVerdict(...), checkedAt, bypassed: false }
+```
+
+- Both the boot path (`ensureEngine('startup')`) and the 60-second keep-alive
+  (`ensureEngine('keep-alive')`) consult `gateBlocksEngineStart()`; when it holds they return
+  `note: 'memory-gate'` and never probe or launch the engine.
+- A manual request (`POST /gpt-sovits/api?action=ensure-engine`, the "Start engine" button in the
+  status card) is the user speaking, so it is **allowed** and sets `bypassed` to `true`: the
+  keep-alive will not fight it for the rest of the launch.
+
+#### Reading the state
+
+`memoryGate` in `GET /gpt-sovits/api?action=status` is the decision itself:
+
+```json
+{ "enabled": true, "thresholdMb": 4096, "freeMb": 3120, "gated": true,
+  "reason": "low", "checkedAt": 1792650000, "bypassed": false }
+```
+
+The settings page renders it as one line — **"low memory — engine not started · 3.0 GB < 4.0 GB"** —
+next to a "Start engine" button. The decision is also written to
+`$DSH_HOME/gpt-sovits/memory-gate.json`, and one line is appended to `memory-gate.log`:
+
+```
+2026-10-21T06:04:44.100Z free 3120 MB < 4096 MB — the engine will not start; the plugin stays loaded
+```
+
+#### Relationship to the earlier 0.3.3 design
+
+The first implementation switched the whole plugin off when memory was short (writing
+`disabled: true` into the profile's `cordis.patch.yml`). Measurement showed two problems: the disable
+failed whenever the plugin manager was not ready yet (the log kept only `the entry cannot be
+disabled; running anyway`), and once disabled, the settings page disappeared with it — so changing the
+threshold required re-enabling the plugin first. The current design keeps the gate on the engine only.

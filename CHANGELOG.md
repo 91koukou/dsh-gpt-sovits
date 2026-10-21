@@ -6,6 +6,58 @@ All notable changes to this plugin are recorded here. The format follows
 
 ---
 
+## [0.3.3] — 2026-10-21
+
+A startup memory check: DSH is opened, free memory is read once, and only then is the engine allowed
+to start. The gate withholds the engine, never the plugin.
+
+### Added
+
+- **The check.** Once per DSH launch, before anything is mounted, free physical memory is compared
+  against a line (4.0 GB by default). Below it the engine is simply not started: the boot path and
+  the 60-second keep-alive both return `note: 'memory-gate'` without probing or launching. The plugin
+  itself loads normally, so the settings page, the engine console and the model list stay available
+  and the reason is readable where it can be acted on.
+
+- **A manual start is the escape hatch.** The status card shows the decision as a line — "low memory
+  — engine not started · 3.0 GB < 4.0 GB" — next to a "Start engine" button. A manual request is
+  allowed even when the gate holds, and it retires the gate for the rest of the launch so the
+  keep-alive does not fight it.
+
+- **Two settings**, in the playback area of the settings page: whether to check at all, and the
+  threshold in GB (512 MB to 32 GB). They live in `settings.json` rather than browser storage because
+  the host reads them before the plugin mounts anything, when no browser exists yet.
+
+- **The decision is reported.** `action=status` carries `memoryGate` (`enabled`, `thresholdMb`,
+  `freeMb`, `gated`, `reason`, `checkedAt`, `bypassed`), the same object is written to
+  `memory-gate.json`, and one line goes to `memory-gate.log` per launch.
+
+### Changed
+
+- **The earlier self-disable design is gone.** 0.3.3 was first written to switch the plugin's own
+  Loader row off (`disabled: true` in the profile patch) through the plugin manager. Measured on a
+  real machine, that failed whenever the manager was not ready yet (log: `the entry cannot be
+  disabled; running anyway`), and a successful disable took the settings page with it, so changing
+  the threshold meant re-enabling the plugin first. Withholding the engine reaches the same goal
+  without either problem.
+
+### Notes
+
+- **Every failure lets the engine start.** A disabled gate or a refused memory reading must not
+  withhold it; that would be worse than the pressure this guards against.
+- **Equality passes.** The rule is "free is below the line", so a machine sitting exactly on 4.0 GB
+  keeps working.
+- **The threshold applies on the next launch.** The check is a once-per-launch decision, not a live
+  guard; the settings page says so.
+
+### Tests
+
+62 offline checks. The gate check lifts `memoryVerdict` and executes it: above the line starts, below
+holds, equality starts, a disabled gate never holds, an unreadable or non-numeric reading starts, and
+the default is 4.0 GB. It also asserts the wiring as source facts — the boot path stands down before
+probing, only automatic callers are gated, a manual start sets `bypassed`, the refusal names the gate,
+and the host never calls `setPluginEnabled` (the gate withholds the engine, not the plugin).
+
 ## [0.3.2] — 2026-10-04
 
 Four reliability fixes, all of them found by reading a diagnostic log rather than by guessing. They
