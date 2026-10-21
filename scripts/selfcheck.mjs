@@ -68,8 +68,61 @@ check('host: parses as an ES module', () => {
 check('host: declares the expected exports', () => {
   assert(/export const name = 'gpt-sovits'/.test(hostSource), 'missing `name` export')
   assert(/export const Config = Schema\.object\(/.test(hostSource), 'missing `Config` schema')
-  assert(/export function apply\(ctx, config\)/.test(hostSource), 'missing `apply(ctx, config)`')
+  // `apply` is async because the memory gate consults the plugin manager before mounting anything.
+  assert(/export (async )?function apply\(ctx, config\)/.test(hostSource), 'missing `apply(ctx, config)`')
   return 'name + Config + apply(ctx, config)'
+})
+
+check('host: the startup memory gate is a pure rule with safe defaults', () => {
+  /*
+   * The gate decides whether the next launch runs the plugin at all, so its rule is the one piece
+   * here that must not be reasoned about — it is lifted and executed.
+   *
+   * The load-bearing properties are the *fail-open* ones: a disabled gate, an unreadable reading and
+   * a non-numeric reading must all run the plugin. Locking someone out because a probe failed would
+   * be worse than the memory pressure this guards against.
+   */
+  const clamp = extractFunction(hostSource, 'clampNumber')
+  const verdict = extractFunction(hostSource, 'memoryVerdict')
+  const sandbox = {}
+  vm.createContext(sandbox)
+  vm.runInContext(clamp + '\n' + verdict + '\nglobalThis.__verdict = memoryVerdict', sandbox)
+  const gate = sandbox.__verdict
+  const GB = 1024 * 1024 * 1024
+
+  assert(gate({ freeBytes: 4.6 * GB, thresholdMb: 4608 }).gated === false, 'above the line must run')
+  assert(gate({ freeBytes: 4.4 * GB, thresholdMb: 4608 }).gated === true, 'below the line must stop')
+  // Equality passes: the rule is "below the line", not "at or below".
+  assert(gate({ freeBytes: 4.5 * GB, thresholdMb: 4608 }).gated === false, 'exactly on the line must run')
+
+  assert(gate({ freeBytes: 1 * GB, thresholdMb: 4608, enabled: false }).gated === false,
+    'a gate the user turned off must never stop the plugin')
+  assert(gate({ freeBytes: undefined, thresholdMb: 4608 }).gated === false,
+    'an unreadable reading must run the plugin')
+  assert(gate({ freeBytes: Number.NaN, thresholdMb: 4608 }).gated === false, 'a NaN reading must run the plugin')
+  assert(gate({ freeBytes: -1, thresholdMb: 4608 }).gated === false, 'a negative reading must run the plugin')
+  assert(gate({}).gated === false, 'an empty input must run the plugin')
+
+  assert(gate({ freeBytes: 1 * GB, thresholdMb: 0 }).thresholdMb === 512, 'the threshold must clamp up to 512 MB')
+  assert(gate({ freeBytes: 1 * GB, thresholdMb: 1e9 }).thresholdMb === 32768, 'the threshold must clamp down')
+  assert(gate({ freeBytes: 1 * GB }).thresholdMb === 4608, 'the default threshold is 4.5 GB')
+
+  /*
+   * Wiring, as source facts. These are the three that a behaviour test cannot reach without a plugin
+   * manager, and each is the difference between a working gate and a plugin that turns itself off on
+   * every load or never turns off at all.
+   */
+  assert(/await memoryGateStopsPlugin\(\)\) return/.test(hostSource),
+    'the gate must run before the plugin mounts anything')
+  assert(/setPluginEnabled\(own\.entryId, false\)/.test(hostSource),
+    'the plugin must disable its own loader entry')
+  assert(/memoryStampIsCurrent\(readMemoryStamp\(\)\)/.test(hostSource),
+    'one decision per process, so the plugin manager can turn it back on')
+  assert(/readOnlyReason !== undefined/.test(hostSource),
+    'an entry the loader cannot address must open the gate rather than fail')
+  assert(/writeMemoryStamp\(/.test(hostSource), 'the decision must be stamped before it is acted on')
+
+  return 'below the line stops, equality runs, every failure runs, one decision per process'
 })
 
 check('host: registers both routes with the webserver contract', () => {
